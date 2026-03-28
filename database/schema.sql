@@ -9,18 +9,19 @@ create extension if not exists "uuid-ossp";
 -- ── 1. athletes ─────────────────────────────────────────────────
 -- Master registry of all Allez Fencing club members.
 create table if not exists athletes (
-    id              uuid primary key default uuid_generate_v4(),
-    name_display    text not null,          -- "Daniel Jason Panga"
-    name_ftl        text,                   -- Exact name as stored on FTL (e.g. "PANGA Daniel")
-    uk_ratings_id   integer unique,         -- UK Ratings athlete ID (null if not registered)
-    ftl_fencer_id   text unique,            -- FTL internal fencer ID (discovered from their profile page)
-    weapon          text check (weapon in ('foil', 'epee', 'sabre')),
-    club            text default 'Allez Fencing',
-    age_category    text,                   -- e.g. "U14", "U17", "Senior"
-    hand            text check (hand in ('right', 'left')),
-    active          boolean default true,   -- false = no longer competing
-    last_refreshed  timestamptz,            -- when data was last pulled from FTL/UK Ratings
-    created_at      timestamptz default now()
+    id                      uuid primary key default uuid_generate_v4(),
+    name_display            text not null,          -- "Daniel Jason Panga"
+    name_ftl                text,                   -- Exact name as stored on FTL (e.g. "PANGA Daniel")
+    uk_ratings_id           integer unique,         -- UK Ratings athlete ID (null if not registered)
+    uk_ratings_weapon_code  integer,                -- UK Ratings weapon code: 34=foil, 35=epee, 36=sabre
+    ftl_fencer_id           text unique,            -- FTL internal fencer ID (discovered from their profile page)
+    weapon                  text check (weapon in ('foil', 'epee', 'sabre')),
+    club                    text default 'Allez Fencing',
+    age_category            text,                   -- e.g. "U14", "U17", "Senior"
+    hand                    text check (hand in ('right', 'left')),
+    active                  boolean default true,   -- false = no longer competing
+    last_refreshed          timestamptz,            -- when data was last pulled from FTL/UK Ratings
+    created_at              timestamptz default now()
 );
 
 comment on table athletes is 'Master registry of all Allez Fencing athletes';
@@ -46,16 +47,25 @@ comment on table tournaments is 'Known tournaments with FTL IDs for data collect
 -- ── 3. events ───────────────────────────────────────────────────
 -- Each row = one athlete at one event (their result).
 create table if not exists events (
-    id              uuid primary key default uuid_generate_v4(),
-    athlete_id      uuid not null references athletes(id) on delete cascade,
-    tournament_id   uuid references tournaments(id),
-    event_name      text not null,          -- "U-14 Men's Foil"
-    date            date,                   -- exact date from FTL
-    placement       integer,                -- 1 = gold, 2 = silver, etc.
-    field_size      integer,                -- total number of fencers in the event
-    ftl_event_id    text,                   -- FTL event ID (from URL, for data collection)
-    weapon          text check (weapon in ('foil', 'epee', 'sabre')),
-    created_at      timestamptz default now(),
+    id                      uuid primary key default uuid_generate_v4(),
+    athlete_id              uuid not null references athletes(id) on delete cascade,
+    tournament_id           uuid references tournaments(id),
+    event_name              text not null,          -- "U-14 Men's Foil"
+    date                    date,                   -- exact date from FTL
+    placement               integer,                -- 1 = gold, 2 = silver, etc.
+    field_size              integer,                -- total number of fencers in the event
+    ftl_event_id            text,                   -- FTL event ID (from URL, for data collection)
+    uk_ratings_tourney_id   integer,                -- UK Ratings /tourneys/tourneydetail/{id}
+    -- Pool aggregate stats (populated by FTL collector)
+    pool_id_seed            text,                   -- first pool_id in event (used to query pool stats)
+    pool_v                  integer,                -- pool victories
+    pool_l                  integer,                -- pool losses
+    pool_ts                 integer,                -- pool touches scored
+    pool_tr                 integer,                -- pool touches received
+    pool_ind                integer,                -- pool indicator (ts - tr)
+    advanced_to_de          boolean,                -- true if fencer advanced through pools
+    weapon                  text check (weapon in ('foil', 'epee', 'sabre')),
+    created_at              timestamptz default now(),
     unique (athlete_id, tournament_id, event_name)
 );
 
@@ -118,9 +128,16 @@ comment on table annual_stats is 'UK Ratings annual pool and DE win/loss totals'
 create index if not exists idx_events_athlete    on events(athlete_id);
 create index if not exists idx_events_tournament on events(tournament_id);
 create index if not exists idx_events_date       on events(date desc);
+create index if not exists idx_events_uk_tourney on events(uk_ratings_tourney_id);
 create index if not exists idx_pool_bouts_event  on pool_bouts(event_id);
 create index if not exists idx_de_bouts_event    on de_bouts(event_id);
 create index if not exists idx_annual_stats_ath  on annual_stats(athlete_id, year desc);
+
+-- ── Constraints ──────────────────────────────────────────────────
+-- Prevents duplicate DE bout insertions when the scraper re-runs
+alter table de_bouts
+  add constraint de_bouts_event_round_opponent_key
+  unique (event_id, round, opponent_name);
 
 -- ── Row Level Security ──────────────────────────────────────────
 -- Enable RLS on all tables (required for publishable key to work safely)

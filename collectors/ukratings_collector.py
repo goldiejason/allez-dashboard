@@ -21,6 +21,7 @@ import os
 import re
 import time
 import logging
+from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from typing import Optional
 
@@ -794,7 +795,7 @@ def collect_athlete(
 
     # Update last_refreshed on athlete record
     db = get_write_client()
-    db.table("athletes").update({"last_refreshed": "now()"}).eq("id", athlete_id).execute()
+    db.table("athletes").update({"last_refreshed": datetime.now(timezone.utc).isoformat()}).eq("id", athlete_id).execute()
 
     return {
         "events":      events_summary,

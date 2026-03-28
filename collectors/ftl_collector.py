@@ -27,6 +27,7 @@ import os
 import re
 import time
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
@@ -425,7 +426,7 @@ def collect_athlete(athlete_id: str, name_ftl: str, force: bool = False) -> dict
 
     # Update last_refreshed timestamp
     db.table("athletes").update(
-        {"last_refreshed": "now()"}
+        {"last_refreshed": datetime.now(timezone.utc).isoformat()}
     ).eq("id", athlete_id).execute()
 
     return summary

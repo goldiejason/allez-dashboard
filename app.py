@@ -152,7 +152,7 @@ def _render_pool_tab(pool: dict, pool_bouts: list, volatility: dict, events: lis
 
 def _render_de_tab(de: dict, de_bouts: list):
     if not de:
-        st.info("No DE bout data yet — individual DE results are collected in Phase 2 (requires socket.io).")
+        st.info("No DE bout data yet. DE results are collected from UK Ratings — run a refresh or wait for the weekend automation.")
         return
     c1, c2 = st.columns(2)
     c1.metric("DE Win %",  f"{de.get('de_win_pct')}%")
@@ -383,9 +383,9 @@ placed_events = [e for e in events if e.get("placement") and e.get("field_size")
 
 k1, k2, k3, k4, k5 = st.columns(5)
 k1.metric("Events Competed",     len(events))
-k2.metric("Pool Win %",          f"{event_pool.get('pool_win_pct', '—')}%"
+k2.metric("Pool Win %",          f"{event_pool.get('pool_win_pct') or '—'}%"
           if event_pool else "—")
-k3.metric("Touch Diff / Bout",   event_pool.get("touch_diff_per_bout", "—")
+k3.metric("Touch Diff / Bout",   event_pool.get("touch_diff_per_bout") or "—"
           if event_pool else "—")
 k4.metric("Advanced to DE %",    f"{event_pool.get('advanced_to_de_pct', '—')}%"
           if event_pool else "—")

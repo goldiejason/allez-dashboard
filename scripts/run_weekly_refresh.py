@@ -24,7 +24,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-STALE_AFTER_DAYS = 6  # skip athlete if refreshed within this many days
+STALE_AFTER_HOURS = 12  # skip athlete if refreshed within this many hours
+# 12 hours: prevents the on-demand dashboard button from re-running the same day,
+# but allows both the Saturday and Sunday scheduled runs to execute independently.
 
 
 def should_skip(last_refreshed: str | None) -> bool:
@@ -33,7 +35,7 @@ def should_skip(last_refreshed: str | None) -> bool:
     try:
         refreshed_at = datetime.fromisoformat(last_refreshed.replace("Z", "+00:00"))
         age = datetime.now(timezone.utc) - refreshed_at
-        return age < timedelta(days=STALE_AFTER_DAYS)
+        return age < timedelta(hours=STALE_AFTER_HOURS)
     except Exception:
         return False
 
@@ -52,7 +54,7 @@ def main():
         name = athlete["name_display"]
 
         if should_skip(athlete.get("last_refreshed")):
-            logger.info(f"SKIP  {name} — refreshed within last {STALE_AFTER_DAYS} days")
+            logger.info(f"SKIP  {name} — refreshed within last {STALE_AFTER_HOURS} hours")
             skipped += 1
             continue
 
