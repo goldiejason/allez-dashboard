@@ -11,17 +11,31 @@ NOTE: Individual pool bouts and DE bouts are loaded via socket.io (not standard 
       We collect aggregate pool stats (V, L, TS, TR, indicator) per event via the JSON API.
       Individual bout data is a Phase 2 addition requiring a headless browser or socket.io client.
 
-FTL login will be required from 2026-04-14 — monitor and add auth when needed.
+Auth (required from 2026-04-14):
+  FTL requires a free account to access tournament results.
+  Set FTL_USERNAME and FTL_PASSWORD in .env — the collector handles login automatically.
+
+  Login flow (reverse-engineered from /js/login.*.js):
+    1. GET /account/login        → session cookie + CSRF token in <meta name='csrf_token'>
+    2. POST /login               → body: {username, password}, header: x-csrf-token
+                                   response body = redirect URL on success, error text on failure
+    3. GET {redirect URL}        → establishes full authenticated session
+    4. All subsequent requests   → httpx.Client preserves session cookies automatically
 """
 
+import os
 import re
 import time
 import logging
 from typing import Optional
+
 import httpx
 from bs4 import BeautifulSoup
+from dotenv import load_dotenv
 
 from database.client import get_write_client
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -40,15 +54,154 @@ HEADERS = {
     "Accept-Language": "en-GB,en;q=0.9",
 }
 
+# ── Module-level authenticated client ─────────────────────────
+# Created once at first use, reused across all requests.
+# httpx.Client maintains a cookie jar automatically.
+_client: Optional[httpx.Client] = None
+
+
+def _login(client: httpx.Client) -> bool:
+    """
+    Log in to FTL using credentials from the environment.
+
+    Flow (from /js/login.*.js):
+      1. GET /account/login  — establish session cookie + extract CSRF token
+      2. POST /login         — submit credentials with CSRF header
+      3. Response body       — redirect URL on success, error string on failure
+      4. GET redirect URL    — follow to fully establish the session
+
+    Returns True on success, False on failure.
+    """
+    username = os.getenv("FTL_USERNAME", "").strip()
+    password = os.getenv("FTL_PASSWORD", "").strip()
+
+    if not username or not password:
+        logger.warning(
+            "FTL_USERNAME or FTL_PASSWORD not set in .env — "
+            "running unauthenticated. This will break on 2026-04-14."
+        )
+        return False
+
+    login_page_url = f"{FTL_BASE}/account/login"
+    post_url       = f"{FTL_BASE}/login"
+
+    try:
+        # Step 1: GET login page — sets session cookie + gives us the CSRF token
+        time.sleep(REQUEST_DELAY)
+        resp = client.get(login_page_url)
+        resp.raise_for_status()
+
+        soup = BeautifulSoup(resp.text, "lxml")
+        meta = soup.find("meta", {"name": "csrf_token"})
+        if not meta:
+            logger.error("FTL: <meta name='csrf_token'> not found on login page")
+            return False
+        csrf_token = meta.get("content", "")
+        if not csrf_token:
+            logger.error("FTL: CSRF token is empty")
+            return False
+
+        # Step 2: POST credentials — response body is redirect URL on success
+        time.sleep(REQUEST_DELAY)
+        post_resp = client.post(
+            post_url,
+            data={"username": username, "password": password},
+            headers={"x-csrf-token": csrf_token},
+            follow_redirects=False,
+        )
+        post_resp.raise_for_status()
+
+        redirect_target = post_resp.text.strip()
+
+        # Detect failure: success yields a URL path, failure yields an error string
+        if not (redirect_target.startswith("/") or redirect_target.startswith("http")):
+            logger.error(
+                f"FTL login failed — server said: {redirect_target[:120]}"
+            )
+            return False
+
+        # Step 3: Follow the redirect to fully establish the authenticated session
+        time.sleep(REQUEST_DELAY)
+        redir_full = (
+            redirect_target
+            if redirect_target.startswith("http")
+            else f"{FTL_BASE}{redirect_target}"
+        )
+        client.get(redir_full, follow_redirects=True)
+
+        logger.info("FTL login successful")
+        return True
+
+    except Exception as e:
+        logger.error(f"FTL login error: {e}")
+        return False
+
+
+def _get_client() -> httpx.Client:
+    """
+    Return the shared authenticated httpx.Client, creating and logging in if needed.
+
+    If credentials are absent or login fails, returns an unauthenticated client
+    (which will continue to work until 2026-04-14).
+    """
+    global _client
+    if _client is None:
+        new_client = httpx.Client(
+            headers=HEADERS,
+            follow_redirects=True,
+            timeout=REQUEST_TIMEOUT,
+        )
+        _login(new_client)   # mutates the client's cookie jar in place
+        _client = new_client
+    return _client
+
+
+def _is_auth_redirect(resp: httpx.Response) -> bool:
+    """
+    Detect whether a response is actually a redirect to the login page —
+    indicating the session has expired mid-run.
+    """
+    return "/account/login" in str(resp.url)
+
+
+def _reauth_and_retry(url: str, is_json: bool) -> Optional[httpx.Response]:
+    """
+    Re-authenticate and retry a single request after a session expiry.
+    Returns the new response or None on failure.
+    """
+    global _client
+    logger.warning("FTL session expired — re-authenticating")
+    _client = None  # force a fresh login on next _get_client() call
+    new_client = _get_client()
+    try:
+        time.sleep(REQUEST_DELAY)
+        resp = new_client.get(url)
+        if _is_auth_redirect(resp):
+            logger.error("FTL re-authentication failed — still redirecting to login")
+            return None
+        return resp
+    except Exception as e:
+        logger.error(f"FTL retry failed: {e}")
+        return None
+
 
 # ── HTTP helpers ───────────────────────────────────────────────
 
 def _get_json(url: str) -> Optional[list | dict]:
     """Fetch a URL and return parsed JSON, or None on failure."""
     try:
+        client = _get_client()
         time.sleep(REQUEST_DELAY)
-        r = httpx.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT, follow_redirects=True)
+        r = client.get(url)
         r.raise_for_status()
+
+        # Session expiry returns a 200 redirect to login — detect and reauth
+        if _is_auth_redirect(r):
+            r = _reauth_and_retry(url, is_json=True)
+            if r is None:
+                return None
+            r.raise_for_status()
+
         return r.json()
     except Exception as e:
         logger.error(f"JSON fetch failed {url}: {e}")
@@ -58,9 +211,17 @@ def _get_json(url: str) -> Optional[list | dict]:
 def _get_html(url: str) -> Optional[BeautifulSoup]:
     """Fetch a URL and return parsed HTML, or None on failure."""
     try:
+        client = _get_client()
         time.sleep(REQUEST_DELAY)
-        r = httpx.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT, follow_redirects=True)
+        r = client.get(url)
         r.raise_for_status()
+
+        if _is_auth_redirect(r):
+            r = _reauth_and_retry(url, is_json=False)
+            if r is None:
+                return None
+            r.raise_for_status()
+
         return BeautifulSoup(r.text, "lxml")
     except Exception as e:
         logger.error(f"HTML fetch failed {url}: {e}")
