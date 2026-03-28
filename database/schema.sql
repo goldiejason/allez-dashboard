@@ -105,11 +105,11 @@ create table if not exists de_bouts (
     created_at          timestamptz default now()
 );
 
-comment on table de_bouts is 'Direct elimination bout results from FTL tableaux';
+comment on table de_bouts is 'Direct elimination bout results from UK Ratings (Table 10)';
 
 -- ── 6. annual_stats ─────────────────────────────────────────────
 -- Year-level pool W/L totals from UK Ratings.
--- This is the ONLY data we pull from UK Ratings (everything else from FTL).
+-- UK Ratings also supplies event history (Table 1) and DE bouts (Table 10).
 create table if not exists annual_stats (
     id          uuid primary key default uuid_generate_v4(),
     athlete_id  uuid not null references athletes(id) on delete cascade,

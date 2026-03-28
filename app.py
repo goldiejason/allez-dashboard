@@ -387,7 +387,7 @@ k2.metric("Pool Win %",          f"{event_pool.get('pool_win_pct') or '—'}%"
           if event_pool else "—")
 k3.metric("Touch Diff / Bout",   event_pool.get("touch_diff_per_bout") or "—"
           if event_pool else "—")
-k4.metric("Advanced to DE %",    f"{event_pool.get('advanced_to_de_pct', '—')}%"
+k4.metric("Advanced to DE %",    f"{event_pool.get('advanced_to_de_pct') or '—'}%"
           if event_pool else "—")
 k5.metric("Best Place",
           min((e["placement"] for e in placed_events), default=None) or "—")

@@ -1,5 +1,5 @@
 """
-Weekly refresh script — run by GitHub Actions every Saturday night.
+Weekly refresh script — run by GitHub Actions every Saturday and Sunday night.
 
 For each active athlete:
   - Skip if refreshed within the last 6 days (respects on-demand button clicks)

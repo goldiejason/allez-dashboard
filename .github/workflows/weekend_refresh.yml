@@ -35,11 +35,5 @@ jobs:
           FTL_PASSWORD:              ${{ secrets.FTL_PASSWORD }}
         run: python scripts/run_weekly_refresh.py
 
-      - name: Run UK Ratings annual stats collection
-        env:
-          SUPABASE_URL:              ${{ secrets.SUPABASE_URL }}
-          SUPABASE_ANON_KEY:         ${{ secrets.SUPABASE_ANON_KEY }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          UK_RATINGS_USERNAME:       ${{ secrets.UK_RATINGS_USERNAME }}
-          UK_RATINGS_PASSWORD:       ${{ secrets.UK_RATINGS_PASSWORD }}
-        run: python -c "from collectors.ukratings_collector import collect_all_athletes; collect_all_athletes()"
+      # Note: UK Ratings collection is handled inside run_weekly_refresh.py above
+      # for each athlete with uk_ratings_id. No separate step needed.
