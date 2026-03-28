@@ -3,7 +3,9 @@ Weekly refresh script — run by GitHub Actions every Saturday night.
 
 For each active athlete:
   - Skip if refreshed within the last 6 days (respects on-demand button clicks)
-  - Otherwise collect FTL data and UK Ratings annual stats
+  - Otherwise collect FTL pool/DE data, then run the full UK Ratings
+    collection (event history, DE bouts, annual stats) for athletes
+    who have a uk_ratings_id set.
 """
 
 import logging
@@ -12,7 +14,7 @@ from datetime import datetime, timezone, timedelta
 
 from database.client import get_write_client, get_read_client
 from collectors.ftl_collector import collect_athlete
-from collectors.ukratings_collector import fetch_annual_stats
+from collectors.ukratings_collector import collect_athlete as collect_ukratings
 
 logging.basicConfig(
     level=logging.INFO,
@@ -54,8 +56,8 @@ def main():
             skipped += 1
             continue
 
-        if not athlete.get("ftl_fencer_id"):
-            logger.warning(f"SKIP  {name} — no FTL fencer ID configured")
+        if not athlete.get("name_ftl"):
+            logger.warning(f"SKIP  {name} — no name_ftl configured")
             skipped += 1
             continue
 
@@ -63,22 +65,26 @@ def main():
         try:
             summary = collect_athlete(
                 athlete_id=athlete["id"],
-                ftl_fencer_id=athlete["ftl_fencer_id"],
                 name_ftl=athlete["name_ftl"] or athlete["name_display"],
             )
             logger.info(
-                f"DONE  {name} — "
-                f"events={summary['events']}, "
-                f"pool_bouts={summary['pool_bouts']}, "
-                f"de_bouts={summary['de_bouts']}, "
+                f"FTL   {name} — "
+                f"events_updated={summary['events_updated']}, "
+                f"events_skipped={summary['events_skipped']}, "
                 f"errors={len(summary['errors'])}"
             )
 
             if athlete.get("uk_ratings_id") and athlete.get("weapon"):
-                fetch_annual_stats(
+                ukr = collect_ukratings(
                     athlete_id=athlete["id"],
                     uk_ratings_id=athlete["uk_ratings_id"],
                     weapon=athlete["weapon"],
+                )
+                logger.info(
+                    f"UKR   {name} — "
+                    f"events={ukr.get('events', {}).get('events_upserted', 0)}, "
+                    f"de_bouts={ukr.get('de_bouts', {}).get('inserted', 0)}, "
+                    f"annual_years={ukr.get('annual_years', 0)}"
                 )
 
             refreshed += 1

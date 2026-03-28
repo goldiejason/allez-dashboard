@@ -1,22 +1,22 @@
 """
 FTL Collector — FencingTimeLive data collection.
 
-For a given athlete (identified by their FTL fencer ID), this module:
-  1. Fetches their complete event history from their FTL profile page
-  2. For each event, fetches pool bouts (ts, tr, opponent, result)
-  3. For each event, fetches DE bouts from the tableau
-  4. Writes everything to Supabase
+Discovered FTL API (via browser network analysis):
+  events/results/data/{event_id}          → JSON: all fencers + placement + fencer GUIDs
+  pools/results/data/{event_id}/{pool_id} → JSON: all fencers' aggregate pool stats
+                                            (v, m, ts, tr, ind, prediction, place)
+  events/results/{event_id}               → HTML: contains pool links (for pool_id_seed discovery)
 
-FTL URL patterns:
-  Fencer profile:  https://www.fencingtimelive.com/fencers/results/{FENCER_ID}
-  Event pools:     https://www.fencingtimelive.com/pools/scores/{TOURNAMENT_ID}/{POOL_ID}
-  DE tableau:      https://www.fencingtimelive.com/tableaux/results/{TOURNAMENT_ID}/{EVENT_ID}
+NOTE: Individual pool bouts and DE bouts are loaded via socket.io (not standard HTTP).
+      We collect aggregate pool stats (V, L, TS, TR, indicator) per event via the JSON API.
+      Individual bout data is a Phase 2 addition requiring a headless browser or socket.io client.
+
+FTL login will be required from 2026-04-14 — monitor and add auth when needed.
 """
 
 import re
 import time
 import logging
-from datetime import date
 from typing import Optional
 import httpx
 from bs4 import BeautifulSoup
@@ -36,14 +36,26 @@ HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/124.0.0.0 Safari/537.36"
     ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept": "application/json, text/html, */*",
     "Accept-Language": "en-GB,en;q=0.9",
 }
 
 
 # ── HTTP helpers ───────────────────────────────────────────────
 
-def _get(url: str) -> Optional[BeautifulSoup]:
+def _get_json(url: str) -> Optional[list | dict]:
+    """Fetch a URL and return parsed JSON, or None on failure."""
+    try:
+        time.sleep(REQUEST_DELAY)
+        r = httpx.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT, follow_redirects=True)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        logger.error(f"JSON fetch failed {url}: {e}")
+        return None
+
+
+def _get_html(url: str) -> Optional[BeautifulSoup]:
     """Fetch a URL and return parsed HTML, or None on failure."""
     try:
         time.sleep(REQUEST_DELAY)
@@ -51,275 +63,204 @@ def _get(url: str) -> Optional[BeautifulSoup]:
         r.raise_for_status()
         return BeautifulSoup(r.text, "lxml")
     except Exception as e:
-        logger.error(f"Failed to fetch {url}: {e}")
+        logger.error(f"HTML fetch failed {url}: {e}")
         return None
 
 
 # ── Name matching ──────────────────────────────────────────────
 
-def _name_matches(ftl_row_name: str, athlete_ftl_name: str) -> bool:
+def _name_matches(ftl_name: str, athlete_ftl_name: str) -> bool:
     """
-    Check whether the name in an FTL table row matches the athlete's canonical FTL name.
-
-    FTL stores names in various formats:
-      "PANGA Daniel", "PANGA Daniel J", "Daniel PANGA"
-
-    We store the canonical FTL name (e.g. "PANGA Daniel") in athletes.name_ftl.
-    We do a normalised word-set comparison so minor variations still match.
+    Word-set matching: all words in athlete's stored name must appear in the FTL row name.
+    Handles formats like 'PANGA Daniel', 'PANGA Daniel J', 'Daniel PANGA'.
     """
-    row_words  = set(ftl_row_name.upper().split())
+    row_words    = set(ftl_name.upper().split())
     target_words = set(athlete_ftl_name.upper().split())
-    # All words in the stored name must appear in the row name
     return target_words.issubset(row_words)
 
 
-# ── Pool bout extraction ───────────────────────────────────────
+# ── Pool ID discovery ──────────────────────────────────────────
 
-def extract_pool_bouts(tournament_id: str, pool_id: str, athlete_ftl_name: str) -> list[dict]:
+def discover_pool_id_seed(ftl_event_id: str) -> Optional[str]:
     """
-    Fetch a single pool score sheet from FTL and extract this athlete's bouts.
+    Fetch the events/results/{event_id} HTML page and extract any pool_id link.
+    Returns the first pool_id found, or None.
 
-    Returns a list of dicts:
-      {opponent_name, opponent_club, opponent_country, ts, tr, result, bout_order}
+    This gives us a pool_id 'seed' we can then use with pools/results/data/
+    to fetch full pool standings for all fencers.
     """
-    url = f"{FTL_BASE}/pools/scores/{tournament_id}/{pool_id}"
-    soup = _get(url)
+    url = f"{FTL_BASE}/events/results/{ftl_event_id}"
+    soup = _get_html(url)
     if not soup:
-        return []
+        return None
 
-    bouts = []
-    # FTL pool tables: rows are fencers, columns include opponent scores
-    # Each score cell contains "V5" (victory, 5 touches) or "D3" (defeat, 3 touches)
-    table = soup.find("table", class_=re.compile(r"pool", re.I))
-    if not table:
-        logger.warning(f"No pool table found at {url}")
-        return []
+    # Pool links are embedded in the HTML: /pools/scores/{event_id}/{pool_id}
+    for tag in soup.find_all(href=True):
+        m = re.search(r"/pools/scores/[A-F0-9]{32}/([A-F0-9]{32})", tag["href"], re.I)
+        if m:
+            return m.group(1).upper()
 
-    rows = table.find_all("tr")
-    fencer_names = []
-
-    # First pass: collect all fencer names from the row headers
-    for row in rows:
-        header = row.find("th") or (row.find_all("td")[0] if row.find_all("td") else None)
-        if header:
-            name_text = header.get_text(separator=" ", strip=True)
-            fencer_names.append(name_text)
-
-    # Find our athlete's row
-    our_row_idx = None
-    for i, name in enumerate(fencer_names):
-        if _name_matches(name, athlete_ftl_name):
-            our_row_idx = i
-            break
-
-    if our_row_idx is None:
-        logger.warning(f"Could not find '{athlete_ftl_name}' in pool at {url}")
-        return []
-
-    our_row = rows[our_row_idx]
-    cells = our_row.find_all("td")
-
-    bout_order = 0
-    for j, cell in enumerate(cells):
-        text = cell.get_text(strip=True)
-        # Cells contain "V5", "D3", "V" (victory by withdrawal), "D" etc.
-        if j == our_row_idx:
-            continue  # diagonal (self)
-        match = re.match(r"^([VD])(\d*)$", text, re.I)
-        if not match:
-            continue
-        won = match.group(1).upper() == "V"
-        score_str = match.group(2)
-        ts = int(score_str) if score_str else (5 if won else 0)
-        # Opponent score is in the transposed cell (their row, our column)
-        opponent_name = fencer_names[j] if j < len(fencer_names) else "Unknown"
-        # Get opponent's score in this bout (their row, column = our_row_idx)
-        opp_row = rows[j]
-        opp_cells = opp_row.find_all("td")
-        tr = 0
-        if our_row_idx < len(opp_cells):
-            opp_text = opp_cells[our_row_idx].get_text(strip=True)
-            opp_match = re.match(r"^[VD](\d*)$", opp_text, re.I)
-            if opp_match and opp_match.group(1):
-                tr = int(opp_match.group(1))
-
-        bout_order += 1
-        bouts.append({
-            "opponent_name":    opponent_name.strip(),
-            "opponent_club":    None,
-            "opponent_country": "GBR",
-            "ts":               ts,
-            "tr":               tr,
-            "result":           won,
-            "bout_order":       bout_order,
-        })
-
-    return bouts
+    # Also check raw HTML text (sometimes in JS vars)
+    pattern = re.compile(
+        r"pools/scores/[A-F0-9]{32}/([A-F0-9]{32})", re.I
+    )
+    m = pattern.search(soup.get_text())
+    return m.group(1).upper() if m else None
 
 
-# ── DE bout extraction ─────────────────────────────────────────
+# ── Event results (placements + fencer IDs) ────────────────────
 
-def extract_de_bouts(tournament_id: str, event_id: str, athlete_ftl_name: str) -> list[dict]:
+def fetch_event_results(ftl_event_id: str) -> list[dict]:
     """
-    Fetch the DE tableau for an event and extract this athlete's DE bouts.
-
-    Returns a list of dicts:
-      {round, opponent_name, opponent_country, ts, tr, result}
+    Fetch /events/results/data/{event_id}.
+    Returns a list of dicts: {id, name, place, clubs, country, ...}
     """
-    url = f"{FTL_BASE}/tableaux/results/{tournament_id}/{event_id}"
-    soup = _get(url)
-    if not soup:
-        return []
-
-    bouts = []
-    # FTL tableau: find all bout rows containing this athlete's name
-    bout_rows = soup.find_all("tr", class_=re.compile(r"bout", re.I))
-
-    round_labels = ["T256", "T128", "T64", "T32", "T16", "QF", "SF", "Bronze", "F"]
-
-    for row in bout_rows:
-        cells = row.find_all("td")
-        if len(cells) < 4:
-            continue
-
-        names_in_row = [c.get_text(strip=True) for c in cells]
-        our_name_idx = None
-        for idx, name in enumerate(names_in_row):
-            if _name_matches(name, athlete_ftl_name):
-                our_name_idx = idx
-                break
-        if our_name_idx is None:
-            continue
-
-        # Determine which fencer is which
-        opp_idx = 1 if our_name_idx == 0 else 0
-        opp_name = names_in_row[opp_idx] if opp_idx < len(names_in_row) else "Unknown"
-
-        # Scores are typically in the middle cells
-        score_cells = [c for c in cells if re.match(r"^\d+$", c.get_text(strip=True))]
-        ts = int(score_cells[our_name_idx].get_text(strip=True)) if len(score_cells) > our_name_idx else 0
-        tr = int(score_cells[opp_idx].get_text(strip=True)) if len(score_cells) > opp_idx else 0
-
-        # Round label — try to extract from row class or nearby header
-        round_label = "Unknown"
-        row_class = " ".join(row.get("class", []))
-        for label in round_labels:
-            if label.lower() in row_class.lower():
-                round_label = label
-                break
-
-        bouts.append({
-            "round":            round_label,
-            "opponent_name":    opp_name.strip(),
-            "opponent_club":    None,
-            "opponent_country": "GBR",
-            "ts":               ts,
-            "tr":               tr,
-            "result":           ts > tr,
-        })
-
-    return bouts
+    url = f"{FTL_BASE}/events/results/data/{ftl_event_id}"
+    data = _get_json(url)
+    return data if isinstance(data, list) else []
 
 
-# ── Main collection entry point ────────────────────────────────
+def get_fencer_placement(ftl_event_id: str, name_ftl: str) -> tuple[Optional[int], int]:
+    """
+    Return (placement, field_size) for an athlete at an event.
+    placement is None if not found.
+    """
+    results = fetch_event_results(ftl_event_id)
+    field_size = len(results)
+    for entry in results:
+        if entry.get("name") and _name_matches(entry["name"], name_ftl):
+            try:
+                placement = int(entry.get("place", 0))
+            except (ValueError, TypeError):
+                placement = None
+            return placement, field_size
+    return None, field_size
 
-def collect_athlete(athlete_id: str, ftl_fencer_id: str, name_ftl: str, force: bool = False) -> dict:
+
+# ── Pool aggregate stats ───────────────────────────────────────
+
+def fetch_pool_stats(ftl_event_id: str, pool_id_seed: str, name_ftl: str) -> Optional[dict]:
+    """
+    Fetch /pools/results/data/{event_id}/{pool_id}.
+    Returns the fencer's aggregate pool stats dict, or None if not found.
+
+    The endpoint returns all fencers in the event (not just one pool),
+    so any valid pool_id works as the second path segment.
+
+    Returned dict fields:
+      pool_v    — victories
+      pool_l    — losses
+      pool_ts   — touches scored
+      pool_tr   — touches received
+      pool_ind  — indicator (ts - tr)
+      advanced_to_de — True if prediction == "Advanced"
+    """
+    url = f"{FTL_BASE}/pools/results/data/{ftl_event_id}/{pool_id_seed}"
+    data = _get_json(url)
+    if not isinstance(data, list):
+        return None
+
+    for entry in data:
+        if entry.get("name") and _name_matches(entry["name"], name_ftl):
+            v = int(entry.get("v", 0))
+            m = int(entry.get("m", 0))
+            ts = int(entry.get("ts", 0))
+            tr = int(entry.get("tr", 0))
+            return {
+                "pool_v":          v,
+                "pool_l":          m - v,
+                "pool_ts":         ts,
+                "pool_tr":         tr,
+                "pool_ind":        ts - tr,
+                "advanced_to_de":  entry.get("prediction", "").lower() == "advanced",
+            }
+
+    logger.warning(f"'{name_ftl}' not found in pool data for event {ftl_event_id}")
+    return None
+
+
+# ── Main collection pipeline ───────────────────────────────────
+
+def collect_athlete(athlete_id: str, name_ftl: str, force: bool = False) -> dict:
     """
     Full collection run for one athlete.
 
-    1. Fetches their FTL fencer profile (all events)
-    2. For each event: fetches pool bouts + DE bouts
-    3. Upserts everything into Supabase
+    Reads events from Supabase where ftl_event_id IS NOT NULL.
+    For each event:
+      1. Fetches placement + field_size from events/results/data/{event_id}
+      2. Discovers pool_id_seed from events/results/{event_id} (if not cached)
+      3. Fetches pool aggregate stats from pools/results/data/
+      4. Updates the event row in Supabase
+
+    NOTE: U10 and earlier events will be collected as their FTL event IDs
+    are added to the events table — the collector handles all age categories
+    automatically since it searches by athlete name regardless of category.
 
     Returns a summary dict with counts.
     """
     db = get_write_client()
-    summary = {"events": 0, "pool_bouts": 0, "de_bouts": 0, "errors": []}
+    summary = {"events_updated": 0, "events_skipped": 0, "errors": []}
 
-    profile_url = f"{FTL_BASE}/fencers/results/{ftl_fencer_id}"
-    logger.info(f"Fetching FTL profile for {name_ftl}: {profile_url}")
-    soup = _get(profile_url)
-    if not soup:
-        summary["errors"].append(f"Could not fetch FTL profile: {profile_url}")
+    # Load all events for this athlete that have a FTL event ID
+    res = db.table("events")\
+        .select("id, ftl_event_id, pool_id_seed, event_name, date")\
+        .eq("athlete_id", athlete_id)\
+        .not_.is_("ftl_event_id", "null")\
+        .execute()
+
+    if not res.data:
+        logger.info(f"No events with ftl_event_id found for athlete {athlete_id}")
         return summary
 
-    # Parse event list from profile page
-    # FTL profile lists events in a table: date | tournament | event | place
-    event_rows = soup.select("table tr")[1:]  # skip header
+    logger.info(f"Processing {len(res.data)} events for '{name_ftl}'")
 
-    for row in event_rows:
-        cells = row.find_all("td")
-        if len(cells) < 4:
-            continue
+    for event_row in res.data:
+        event_db_id    = event_row["id"]
+        ftl_event_id   = event_row["ftl_event_id"]
+        pool_id_seed   = event_row.get("pool_id_seed")
+        event_name     = event_row.get("event_name", "?")
 
         try:
-            date_text       = cells[0].get_text(strip=True)
-            tournament_name = cells[1].get_text(strip=True)
-            event_name      = cells[2].get_text(strip=True)
-            placement_text  = cells[3].get_text(strip=True)
+            update = {}
 
-            # Parse date (FTL format varies: "Jan 27, 2024" or "2024-01-27")
-            event_date = _parse_date(date_text)
-            placement  = _parse_placement(placement_text)
+            # 1. Get placement + field_size
+            placement, field_size = get_fencer_placement(ftl_event_id, name_ftl)
+            if placement is not None:
+                update["placement"]   = placement
+                update["field_size"]  = field_size
+                logger.info(f"  {event_name}: placed {placement}/{field_size}")
+            else:
+                logger.warning(f"  {event_name}: fencer not found in event results")
 
-            # Extract tournament and event IDs from links
-            links = row.find_all("a", href=True)
-            ftl_tournament_id, ftl_event_id = None, None
-            for link in links:
-                href = link["href"]
-                t_match = re.search(r"/tableaux/results/([A-F0-9]+)/([A-F0-9]+)", href, re.I)
-                if t_match:
-                    ftl_tournament_id = t_match.group(1)
-                    ftl_event_id      = t_match.group(2)
+            # 2. Discover pool_id_seed if not cached
+            if not pool_id_seed:
+                pool_id_seed = discover_pool_id_seed(ftl_event_id)
+                if pool_id_seed:
+                    update["pool_id_seed"] = pool_id_seed
+                    logger.info(f"  {event_name}: discovered pool_id_seed={pool_id_seed}")
 
-            # Upsert tournament
-            tournament_db_id = None
-            if ftl_tournament_id:
-                t_res = db.table("tournaments").upsert(
-                    {"name": tournament_name, "ftl_tournament_id": ftl_tournament_id},
-                    on_conflict="ftl_tournament_id"
-                ).execute()
-                if t_res.data:
-                    tournament_db_id = t_res.data[0]["id"]
+            # 3. Fetch pool aggregate stats
+            if pool_id_seed:
+                pool_stats = fetch_pool_stats(ftl_event_id, pool_id_seed, name_ftl)
+                if pool_stats:
+                    update.update(pool_stats)
+                    logger.info(
+                        f"  {event_name}: pool V{pool_stats['pool_v']}"
+                        f"/L{pool_stats['pool_l']} "
+                        f"TS{pool_stats['pool_ts']}-TR{pool_stats['pool_tr']} "
+                        f"{'→DE' if pool_stats['advanced_to_de'] else '→OUT'}"
+                    )
 
-            # Upsert event
-            e_res = db.table("events").upsert({
-                "athlete_id":     athlete_id,
-                "tournament_id":  tournament_db_id,
-                "event_name":     event_name,
-                "date":           str(event_date) if event_date else None,
-                "placement":      placement,
-                "ftl_event_id":   ftl_event_id,
-            }, on_conflict="athlete_id,tournament_id,event_name").execute()
-
-            if not e_res.data:
-                continue
-
-            event_db_id = e_res.data[0]["id"]
-            summary["events"] += 1
-
-            # Collect pool bouts (need pool IDs — found on event detail page)
-            if ftl_tournament_id and ftl_event_id:
-                pool_ids = _discover_pool_ids(ftl_tournament_id, ftl_event_id)
-                for pool_id in pool_ids:
-                    bouts = extract_pool_bouts(ftl_tournament_id, pool_id, name_ftl)
-                    for bout in bouts:
-                        bout["event_id"] = event_db_id
-                    if bouts:
-                        db.table("pool_bouts").upsert(bouts).execute()
-                        summary["pool_bouts"] += len(bouts)
-
-                # Collect DE bouts
-                de_bouts = extract_de_bouts(ftl_tournament_id, ftl_event_id, name_ftl)
-                for bout in de_bouts:
-                    bout["event_id"] = event_db_id
-                if de_bouts:
-                    db.table("de_bouts").upsert(de_bouts).execute()
-                    summary["de_bouts"] += len(de_bouts)
+            # 4. Write updates to Supabase
+            if update:
+                db.table("events").update(update).eq("id", event_db_id).execute()
+                summary["events_updated"] += 1
+            else:
+                summary["events_skipped"] += 1
 
         except Exception as e:
-            logger.error(f"Error processing event row: {e}")
-            summary["errors"].append(str(e))
+            logger.error(f"Error processing event {ftl_event_id}: {e}")
+            summary["errors"].append(f"{event_name}: {e}")
 
     # Update last_refreshed timestamp
     db.table("athletes").update(
@@ -329,42 +270,20 @@ def collect_athlete(athlete_id: str, ftl_fencer_id: str, name_ftl: str, force: b
     return summary
 
 
-# ── Helpers ────────────────────────────────────────────────────
+def collect_all_athletes() -> dict:
+    """Run collect_athlete for every active athlete in the database."""
+    db = get_write_client()
+    athletes = db.table("athletes")\
+        .select("id, name_ftl")\
+        .eq("active", True)\
+        .not_.is_("name_ftl", "null")\
+        .execute()
 
-def _parse_date(text: str):
-    """Try to parse various FTL date formats into a Python date."""
-    import datetime
-    formats = ["%b %d, %Y", "%B %d, %Y", "%Y-%m-%d", "%d %b %Y", "%d/%m/%Y"]
-    clean = re.sub(r"\s+", " ", text.strip())
-    for fmt in formats:
-        try:
-            return datetime.datetime.strptime(clean, fmt).date()
-        except ValueError:
-            pass
-    return None
+    totals = {"athletes": 0, "events_updated": 0, "errors": []}
+    for athlete in (athletes.data or []):
+        result = collect_athlete(athlete["id"], athlete["name_ftl"])
+        totals["athletes"] += 1
+        totals["events_updated"] += result["events_updated"]
+        totals["errors"].extend(result["errors"])
 
-
-def _parse_placement(text: str) -> Optional[int]:
-    """Extract integer placement from text like '3rd', '12th', '1st (tied)'."""
-    m = re.search(r"\d+", text)
-    return int(m.group()) if m else None
-
-
-def _discover_pool_ids(tournament_id: str, event_id: str) -> list[str]:
-    """
-    Fetch the event detail page to find all pool IDs for this event.
-    Returns list of pool ID strings.
-    """
-    # FTL event page lists pools with links to each pool score sheet
-    url = f"{FTL_BASE}/events/results/{tournament_id}/{event_id}"
-    soup = _get(url)
-    if not soup:
-        return []
-
-    pool_ids = []
-    for link in soup.find_all("a", href=True):
-        m = re.search(r"/pools/scores/[A-F0-9]+/([A-F0-9]+)", link["href"], re.I)
-        if m:
-            pool_ids.append(m.group(1))
-
-    return list(dict.fromkeys(pool_ids))  # deduplicate, preserve order
+    return totals

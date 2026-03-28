@@ -42,10 +42,11 @@ def fetch_pool_bouts(athlete_id: str) -> list[dict]:
         db.table("pool_bouts")
         .select("*, events!inner(athlete_id, date, event_name)")
         .eq("events.athlete_id", athlete_id)
-        .order("events.date", desc=False)
         .execute()
     )
-    return res.data or []
+    # Sort in Python — PostgREST can't order by embedded resource columns
+    data = res.data or []
+    return sorted(data, key=lambda b: (b.get("events") or {}).get("date") or "")
 
 
 def fetch_de_bouts(athlete_id: str) -> list[dict]:
@@ -55,10 +56,10 @@ def fetch_de_bouts(athlete_id: str) -> list[dict]:
         db.table("de_bouts")
         .select("*, events!inner(athlete_id, date, event_name)")
         .eq("events.athlete_id", athlete_id)
-        .order("events.date", desc=False)
         .execute()
     )
-    return res.data or []
+    data = res.data or []
+    return sorted(data, key=lambda b: (b.get("events") or {}).get("date") or "")
 
 
 def fetch_annual_stats(athlete_id: str) -> list[dict]:
@@ -281,6 +282,42 @@ def calc_trend(events: list[dict], pool_bouts: list[dict]) -> dict:
         "delta":     delta,
         "recent_avg": round(recent, 1),
         "prior_avg":  round(prior, 1),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────
+# Event-level pool aggregation (no individual bout data required)
+# ─────────────────────────────────────────────────────────────────
+
+def calc_event_pool_metrics(events: list[dict]) -> dict:
+    """
+    Aggregate pool stats from event-level columns (pool_v, pool_l, pool_ts, pool_tr).
+    Used when individual pool_bouts are not yet collected (Phase 1 data).
+
+    Returns a subset of the pool metrics dict so the dashboard UI is consistent.
+    """
+    valid = [e for e in events if e.get("pool_v") is not None]
+    if not valid:
+        return {}
+
+    total_v  = sum(e["pool_v"]  for e in valid)
+    total_l  = sum(e["pool_l"]  for e in valid)
+    total_ts = sum(e["pool_ts"] for e in valid)
+    total_tr = sum(e["pool_tr"] for e in valid)
+    total_bouts = total_v + total_l
+
+    advanced = sum(1 for e in valid if e.get("advanced_to_de"))
+
+    return {
+        "pool_win_pct":         round(total_v / total_bouts * 100, 1) if total_bouts else None,
+        "total_pool_bouts":     total_bouts,
+        "ts_total":             total_ts,
+        "tr_total":             total_tr,
+        "touch_diff":           total_ts - total_tr,
+        "touch_diff_per_bout":  round((total_ts - total_tr) / total_bouts, 2) if total_bouts else None,
+        "events_with_pool":     len(valid),
+        "advanced_to_de_count": advanced,
+        "advanced_to_de_pct":   round(advanced / len(valid) * 100, 1) if valid else None,
     }
 
 
