@@ -30,6 +30,8 @@ jobs:
           SUPABASE_URL:              ${{ secrets.SUPABASE_URL }}
           SUPABASE_ANON_KEY:         ${{ secrets.SUPABASE_ANON_KEY }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          FTL_USERNAME:              ${{ secrets.FTL_USERNAME }}
+          FTL_PASSWORD:              ${{ secrets.FTL_PASSWORD }}
         run: python scripts/run_weekly_refresh.py
 
       - name: Run UK Ratings annual stats collection
@@ -37,4 +39,6 @@ jobs:
           SUPABASE_URL:              ${{ secrets.SUPABASE_URL }}
           SUPABASE_ANON_KEY:         ${{ secrets.SUPABASE_ANON_KEY }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          UK_RATINGS_USERNAME:       ${{ secrets.UK_RATINGS_USERNAME }}
+          UK_RATINGS_PASSWORD:       ${{ secrets.UK_RATINGS_PASSWORD }}
         run: python -c "from collectors.ukratings_collector import collect_all_athletes; collect_all_athletes()"
