@@ -10,7 +10,12 @@ For each active athlete:
 
 import logging
 import sys
+import os
 from datetime import datetime, timezone, timedelta
+
+# Ensure the project root is on sys.path so sibling packages resolve correctly
+# regardless of which directory the script is invoked from.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from database.client import get_write_client, get_read_client
 from collectors.ftl_collector import collect_athlete
