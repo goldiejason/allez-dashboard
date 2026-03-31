@@ -3,10 +3,10 @@ UK Ratings Collector — event history, DE bouts, and annual stats.
 
 Data source: https://www.ukratings.co.uk/tourneys/athleteex/{weapon_code}/{uk_ratings_id}/None
 
-Tables scraped:
-  Table 1  → Competition history  (tournament names, placements, UK Ratings tourney IDs)
-  Table 10 → Win/Loss Opponent    (individual DE bout results with scores and round)
-  Table N  → Annual pool/DE W/L  (yearly totals — header-matched)
+Tables scraped (located by header content, not by fixed index):
+  Competition history  → headers contain "Final Position" + "Event NIF"
+  Win/Loss Opponent    → headers contain "Win/Loss" + "Opponent"
+  Annual pool/DE W/L   → year-labelled <th> columns + "Pool Victories" row labels
 
 Collection flow per athlete:
   1. collect_athlete_events    → creates/updates tournaments and events rows
@@ -178,9 +178,16 @@ def _fetch_athlete_page(uk_ratings_id: int, weapon_code: int) -> Optional[Beauti
 
 def _parse_competition_history(soup: BeautifulSoup) -> list[dict]:
     """
-    Parse Table 1 — the competition history rows.
+    Parse the competition history table — past results with placement data.
 
-    Each <tr onclick="window.location='/tourneys/tourneydetail/{id}'"> row contains:
+    We locate it by content: the correct table has <th> headers containing
+    "Event NIF" and "Final Position".  Some athlete pages render an additional
+    upcoming-events table (headers: "Start Date", "Event Name", "Difficulty")
+    BEFORE the history table, which means the old hardcoded tables[1] index
+    picked up the wrong table and stored date strings ("11.04.2026") as
+    event_names.  Content-based detection resolves this for all athletes.
+
+    Each <tr onclick="window.location='/tourneys/tourneydetail/{id}'"> row:
       td[0] = tournament name
       td[1] = event name (age category + weapon)
       td[3] = "placement of field_size"
@@ -189,13 +196,23 @@ def _parse_competition_history(soup: BeautifulSoup) -> list[dict]:
     Returns list of dicts with keys:
       uk_tourney_id, tournament_name, event_name, placement, field_size, season
     """
-    tables = soup.find_all("table")
-    if len(tables) < 2:
-        logger.warning("Table 1 not found on UK Ratings page")
+    comp_table = None
+    for table in soup.find_all("table"):
+        header_row = table.find("tr")
+        if not header_row:
+            continue
+        ths_lower = [th.get_text(strip=True).lower() for th in header_row.find_all("th")]
+        # The competition history table uniquely contains "final position" and "nif"
+        if any("final position" in h for h in ths_lower) and any("nif" in h for h in ths_lower):
+            comp_table = table
+            break
+
+    if comp_table is None:
+        logger.warning("Competition history table not found on UK Ratings page")
         return []
 
     results = []
-    for row in tables[1].find_all("tr", onclick=True):
+    for row in comp_table.find_all("tr", onclick=True):
         onclick = row.get("onclick", "")
         id_match = re.search(r"/tourneys/tourneydetail/(\d+)", onclick)
         if not id_match:
@@ -228,7 +245,12 @@ def _parse_competition_history(soup: BeautifulSoup) -> list[dict]:
 
 def _parse_de_bouts(soup: BeautifulSoup) -> list[dict]:
     """
-    Parse Table 10 — Win/Loss Opponent (DE bouts).
+    Parse the Win/Loss Opponent table — DE bouts.
+
+    The table position varies per athlete depending on how many stat
+    tables the page renders before it.  We locate it by content:
+    looking for a table whose first row has <th> values containing
+    "Win/Loss" and "Opponent", with at least one data row.
 
     Each row has 2 <td> separated internally by <br>:
       Cell 0: result<br>score           e.g. "Lost<br>12 - 4"
@@ -237,13 +259,24 @@ def _parse_de_bouts(soup: BeautifulSoup) -> list[dict]:
     Returns list of dicts (BYEs excluded):
       result, ts, tr, opponent_name, tournament_name, round_text
     """
-    tables = soup.find_all("table")
-    if len(tables) < 11:
-        logger.warning("Table 10 (DE bouts) not found on UK Ratings page")
+    de_table = None
+    for table in soup.find_all("table"):
+        header_row = table.find("tr")
+        if not header_row:
+            continue
+        ths = [th.get_text(strip=True).lower() for th in header_row.find_all("th")]
+        if any("win" in h for h in ths) and any("opponent" in h for h in ths):
+            # Only use this table if it has actual data rows
+            if len(table.find_all("tr")) > 1:
+                de_table = table
+                break
+
+    if de_table is None:
+        logger.info("Win/Loss Opponent table not found on UK Ratings page (athlete may have no DE data)")
         return []
 
     results = []
-    for row in tables[10].find_all("tr")[1:]:  # skip header
+    for row in de_table.find_all("tr")[1:]:  # skip header
         cells = row.find_all("td")
         if len(cells) < 2:
             continue
