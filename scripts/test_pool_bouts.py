@@ -31,8 +31,9 @@ logger = logging.getLogger(__name__)
 from database.client import get_read_client, get_write_client
 from collectors.ftl_collector import (
     _get_html,
-    _parse_pools_page,
-    _extract_bouts_for_athlete,
+    _discover_pool_ids,
+    _parse_pool_fragment,
+    _extract_bouts_from_pool,
     FTL_BASE,
 )
 
@@ -84,19 +85,33 @@ def main():
         url = f"{FTL_BASE}/pools/scores/{event['ftl_event_id']}/{event['pool_id_seed']}"
         logger.info(f"URL   : {url}")
 
-        soup = _get_html(url)
-        if not soup:
-            logger.error("Failed to fetch pool scores page")
+        # Step 1: discover all pool IDs from the landing page JS
+        pool_ids = _discover_pool_ids(event["ftl_event_id"], event["pool_id_seed"])
+        logger.info(f"Found {len(pool_ids)} pool(s) in event")
+
+        # Step 2: search through pool fragments for this athlete
+        surname = athlete["name_ftl"].split()[0].upper()
+        bouts = None
+        found_pool_num = None
+        for pool_num, pool_id in enumerate(pool_ids, 1):
+            frag_url = f"{FTL_BASE}/pools/scores/{event['ftl_event_id']}/{event['pool_id_seed']}/{pool_id}?dbut=true"
+            soup = _get_html(frag_url)
+            if not soup or surname not in soup.get_text().upper():
+                continue
+            pool = _parse_pool_fragment(soup, pool_num)
+            if not pool:
+                continue
+            bouts = _extract_bouts_from_pool(pool, athlete["name_ftl"])
+            if bouts is not None:
+                found_pool_num = pool_num
+                break
+
+        if bouts is None:
+
+            logger.warning(f"Athlete '{athlete['name_ftl']}' not found in any of {len(pool_ids)} pools")
             continue
 
-        pools = _parse_pools_page(soup)
-        logger.info(f"Parsed {len(pools)} pool(s) from page")
-
-        bouts = _extract_bouts_for_athlete(pools, athlete["name_ftl"])
-
-        if not bouts:
-            logger.warning(f"Athlete '{athlete['name_ftl']}' not found in any pool on this page")
-            continue
+        logger.info(f"Found athlete in pool #{found_pool_num}")
 
         # Print extracted bouts
         wins = sum(1 for b in bouts if b["result"])
