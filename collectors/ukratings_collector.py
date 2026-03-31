@@ -300,51 +300,90 @@ def _parse_de_bouts(soup: BeautifulSoup) -> list[dict]:
 def _parse_annual_stats(soup: BeautifulSoup) -> dict:
     """
     Parse annual pool/DE W/L totals from the UK Ratings athlete page.
-    Returns dict keyed by year: {pool_w, pool_l, de_w, de_l}
+
+    Page structure: stats table has year-labelled <th> columns
+    (e.g. "2022", "2023", "2024") and row-type labels in the first <td>
+    of each data row ("Pool Victories", "Pool Losses", "DE Victories",
+    "DE Losses").  The old header-keyword approach never matched because
+    <th> values are years, not descriptive labels.
+
+    Returns dict keyed by year int: {pool_w, pool_l, de_w, de_l}
     """
-    stats = {}
+    YEAR_RE = re.compile(r"^(20\d{2})$")
+
     for table in soup.find_all("table"):
-        headers = [th.get_text(strip=True).lower() for th in table.find_all("th")]
-        if not any("pool" in h or "win" in h or "w/l" in h for h in headers):
+        # Use only the first <tr> for column headers
+        header_row = table.find("tr")
+        if not header_row:
+            continue
+        ths = [th.get_text(strip=True) for th in header_row.find_all("th")]
+
+        # Identify year-indexed columns: th must be exactly "20XX"
+        year_cols: dict[int, int] = {}   # year_int → column_index
+        for col_idx, th_text in enumerate(ths):
+            m = YEAR_RE.match(th_text)
+            if m:
+                year_cols[int(m.group(1))] = col_idx
+
+        if not year_cols:
             continue
 
-        col_year   = _find_col(headers, ["year", "season"])
-        col_pool_w = _find_col(headers, ["pool w", "pool wins", "pw"])
-        col_pool_l = _find_col(headers, ["pool l", "pool losses", "pl"])
-        col_de_w   = _find_col(headers, ["de w", "de wins", "dw", "direct w"])
-        col_de_l   = _find_col(headers, ["de l", "de losses", "dl", "direct l"])
+        # Confirm the table contains pool stats by checking first-column td labels
+        first_labels = []
+        for row in table.find_all("tr")[1:]:
+            cells = row.find_all("td")
+            if cells:
+                first_labels.append(cells[0].get_text(strip=True))
 
-        if col_year is None:
+        if not any(
+            lbl in ("Pool Victories", "Pool Losses")
+            for lbl in first_labels
+        ):
             continue
 
+        # Extract each row's values indexed by year column
+        row_data: dict[str, dict[int, int]] = {}
         for row in table.find_all("tr")[1:]:
             cells = row.find_all("td")
             if not cells:
                 continue
-            try:
-                year_text = cells[col_year].get_text(strip=True) if col_year < len(cells) else ""
-                year_m = re.search(r"20\d{2}", year_text)
-                if not year_m:
-                    continue
-                year = int(year_m.group())
-
-                def _int(idx):
-                    if idx is None or idx >= len(cells):
-                        return 0
-                    t = cells[idx].get_text(strip=True)
-                    m = re.search(r"\d+", t)
-                    return int(m.group()) if m else 0
-
-                stats[year] = {
-                    "pool_w": _int(col_pool_w),
-                    "pool_l": _int(col_pool_l),
-                    "de_w":   _int(col_de_w),
-                    "de_l":   _int(col_de_l),
-                }
-            except (IndexError, ValueError):
+            label = cells[0].get_text(strip=True)
+            if not label:
                 continue
+            row_data[label] = {}
+            for year, col_idx in year_cols.items():
+                if col_idx < len(cells):
+                    raw = cells[col_idx].get_text(strip=True)
+                    m = re.search(r"\d+", raw)
+                    row_data[label][year] = int(m.group()) if m else 0
+                else:
+                    row_data[label][year] = 0
 
-    return stats
+        pool_w_map = row_data.get("Pool Victories", {})
+        pool_l_map = row_data.get("Pool Losses", {})
+        de_w_map   = row_data.get("DE Victories", {})
+        de_l_map   = row_data.get("DE Losses", {})
+
+        stats: dict[int, dict] = {}
+        for year in year_cols:
+            pool_w = pool_w_map.get(year, 0)
+            pool_l = pool_l_map.get(year, 0)
+            de_w   = de_w_map.get(year, 0)
+            de_l   = de_l_map.get(year, 0)
+            # Skip years where all values are zero (e.g. "Prior 2022" with dashes)
+            if pool_w or pool_l or de_w or de_l:
+                stats[year] = {
+                    "pool_w": pool_w,
+                    "pool_l": pool_l,
+                    "de_w":   de_w,
+                    "de_l":   de_l,
+                }
+
+        if stats:
+            # Return from the first valid table (the "All weapons" summary)
+            return stats
+
+    return {}
 
 
 # ── Name normalization + matching ──────────────────────────────────

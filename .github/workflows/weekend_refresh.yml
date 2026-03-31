@@ -26,14 +26,17 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run FTL data collection
+      - name: Run full data refresh (FTL + UK Ratings)
         env:
           SUPABASE_URL:              ${{ secrets.SUPABASE_URL }}
           SUPABASE_ANON_KEY:         ${{ secrets.SUPABASE_ANON_KEY }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           FTL_USERNAME:              ${{ secrets.FTL_USERNAME }}
           FTL_PASSWORD:              ${{ secrets.FTL_PASSWORD }}
+          UK_RATINGS_USERNAME:       ${{ secrets.UK_RATINGS_USERNAME }}
+          UK_RATINGS_PASSWORD:       ${{ secrets.UK_RATINGS_PASSWORD }}
         run: python scripts/run_weekly_refresh.py
 
-      # Note: UK Ratings collection is handled inside run_weekly_refresh.py above
-      # for each athlete with uk_ratings_id. No separate step needed.
+      # UK Ratings collection (event history, DE bouts, annual stats) is handled
+      # inside run_weekly_refresh.py for each athlete with uk_ratings_id set.
+      # UK_RATINGS_USERNAME and UK_RATINGS_PASSWORD must be in GitHub Secrets.
