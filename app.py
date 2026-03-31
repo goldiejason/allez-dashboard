@@ -96,7 +96,7 @@ def _render_annual_stats(annual_stats: list[dict]):
     st.dataframe(df, hide_index=True)
 
 
-def _render_pool_tab(pool: dict, pool_bouts: list, volatility: dict, events: list[dict]):
+def _render_pool_tab(pool: dict, pool_bouts: list, volatility: dict, resilience: dict, events: list[dict]):
     if not pool:
         # Fall back to event-level pool data
         from metrics.calculator import calc_event_pool_metrics
@@ -137,17 +137,73 @@ def _render_pool_tab(pool: dict, pool_bouts: list, volatility: dict, events: lis
             st.plotly_chart(fig, use_container_width=True)
         return
 
-    # Individual bout-level data available
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Win %",              f"{pool.get('pool_win_pct')}%")
-    c2.metric("Touch Differential",  pool.get("touch_diff"))
-    c3.metric("Big Loss Rate",       f"{pool.get('big_loss_rate')}%" if pool.get('big_loss_rate') is not None else "—")
+    # ── Individual bout-level data available ────────────────────
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Win %",               f"{pool.get('pool_win_pct')}%")
+    c2.metric("Touch Diff / Bout",    pool.get("touch_diff_per_bout"))
+    c3.metric("Big Loss Rate",        f"{pool.get('big_loss_rate')}%" if pool.get('big_loss_rate') is not None else "—",
+              help="% of losses conceded by 3+ touches")
+    res_pct = resilience.get("resilience_pct") if resilience else None
+    c4.metric("Resilience Score",     f"{res_pct}%" if res_pct is not None else "—",
+              help="Win rate in the bout immediately following a loss (same event). >60% = strong bounce-back.")
 
     if volatility:
         st.caption(
             f"Consistency: SD {volatility.get('career_sd')}% career · "
             f"SD {volatility.get('recent_sd')}% recent 5 events"
         )
+
+    # ── Per-event touch diff chart ───────────────────────────────
+    from collections import defaultdict
+    ev_map: dict = defaultdict(lambda: {"ts": 0, "tr": 0, "date": "", "name": ""})
+    for b in pool_bouts:
+        ev = b.get("events") or {}
+        eid = b["event_id"]
+        ev_map[eid]["ts"]   += b["ts"]
+        ev_map[eid]["tr"]   += b["tr"]
+        ev_map[eid]["date"]  = ev.get("date", "")
+        ev_map[eid]["name"]  = ev.get("event_name", eid[:8])
+
+    ev_sorted = sorted(ev_map.values(), key=lambda x: x["date"])
+    if len(ev_sorted) >= 2:
+        ev_labels = [e["name"][:22] for e in ev_sorted]
+        ev_diff   = [e["ts"] - e["tr"] for e in ev_sorted]
+        colors    = ["#2ca02c" if d > 0 else "#d62728" for d in ev_diff]
+        fig2 = go.Figure(go.Bar(
+            x=list(range(len(ev_labels))), y=ev_diff,
+            marker_color=colors,
+            text=[f"{'+' if d > 0 else ''}{d}" for d in ev_diff],
+            textposition="outside",
+            hovertext=ev_labels,
+            hoverinfo="text+y",
+        ))
+        fig2.add_hline(y=0, line_color="grey", line_width=1)
+        fig2.update_layout(
+            title="Touch Differential per Event",
+            yaxis_title="TS − TR",
+            xaxis=dict(tickvals=list(range(len(ev_labels))), ticktext=ev_labels, tickangle=-40),
+            height=360, margin=dict(t=45, b=120),
+        )
+        st.plotly_chart(fig2, use_container_width=True)
+
+    # ── Individual bouts expandable ──────────────────────────────
+    with st.expander(f"All pool bouts ({len(pool_bouts)} recorded)"):
+        bout_rows = []
+        for b in sorted(pool_bouts,
+                         key=lambda x: ((x.get("events") or {}).get("date", ""), x.get("bout_order", 0)),
+                         reverse=True):
+            ev = b.get("events") or {}
+            bout_rows.append({
+                "Date":     ev.get("date", "—"),
+                "Event":    ev.get("event_name", "—"),
+                "Opponent": b.get("opponent_name", "—"),
+                "Club":     b.get("opponent_club", "—"),
+                "Result":   "✅ W" if b["result"] else "❌ L",
+                "TS":       b["ts"],
+                "TR":       b["tr"],
+                "Diff":     b["ts"] - b["tr"],
+            })
+        st.dataframe(pd.DataFrame(bout_rows), hide_index=True, use_container_width=True)
 
 
 def _render_de_tab(de: dict, de_bouts: list):
@@ -173,13 +229,53 @@ def _render_rivals_tab(rivals: list):
     if not rivals:
         st.info("Not enough data yet to identify repeat opponents (requires individual bout data from Phase 2).")
         return
+
+    # ── Summary metrics ──────────────────────────────────────────
+    above_50 = sum(1 for r in rivals if r["win_pct"] >= 50)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Repeat Opponents",    len(rivals))
+    c2.metric("Winning Record vs",   f"{above_50} of {len(rivals)}")
+    c3.metric("Most Faced",          rivals[0]["name"].split()[-1] if rivals else "—",
+              help=f"{rivals[0]['total']} bouts" if rivals else "")
+
+    # ── Win % bar chart ──────────────────────────────────────────
+    # Show top 15 by encounter count to keep chart readable
+    display = rivals[:15]
+    names    = [r["name"] for r in display]
+    win_pcts = [r["win_pct"] for r in display]
+    totals   = [r["total"] for r in display]
+    colors   = ["#2ca02c" if w >= 50 else "#d62728" for w in win_pcts]
+    hover    = [f"{r['name']}<br>{r['wins']}W / {r['losses']}L<br>Touch Diff: {r['touch_diff']:+d}" for r in display]
+
+    fig = go.Figure(go.Bar(
+        x=win_pcts,
+        y=names,
+        orientation="h",
+        marker_color=colors,
+        text=[f"{w}%  ({t} bouts)" for w, t in zip(win_pcts, totals)],
+        textposition="outside",
+        hovertext=hover,
+        hoverinfo="text",
+    ))
+    fig.add_vline(x=50, line_color="grey", line_dash="dash", line_width=1)
+    fig.update_layout(
+        title="Win % vs Repeat Opponents",
+        xaxis_title="Win %", xaxis_range=[0, 118],
+        yaxis=dict(autorange="reversed"),
+        height=max(320, len(display) * 38),
+        margin=dict(t=45, l=180, r=60, b=40),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # ── Full table ───────────────────────────────────────────────
     rows = [{
-        "Opponent":   r["name"],
-        "Bouts":      r["total"],
-        "Wins":       r["wins"],
-        "Losses":     r["losses"],
-        "Win %":      f"{r['win_pct']}%",
-        "Touch Diff": r["touch_diff"],
+        "Opponent":       r["name"],
+        "Bouts":          r["total"],
+        "W":              r["wins"],
+        "L":              r["losses"],
+        "Win %":          f"{r['win_pct']}%",
+        "Touch Diff":     f"{r['touch_diff']:+d}",
+        "Diff / Bout":    f"{round(r['touch_diff'] / r['total'], 1):+.1f}",
     } for r in rivals]
     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
@@ -408,7 +504,7 @@ with tab_events:
     _render_event_history(events)
 
 with tab_pool:
-    _render_pool_tab(pool, metrics.get("pool_bouts", []), metrics.get("volatility", {}), events)
+    _render_pool_tab(pool, metrics.get("pool_bouts", []), metrics.get("volatility", {}), metrics.get("resilience", {}), events)
 
 with tab_de:
     _render_de_tab(de, metrics.get("de_bouts", []))

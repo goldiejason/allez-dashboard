@@ -387,7 +387,7 @@ def _parse_pool_fragment(soup: BeautifulSoup, pool_number: int) -> Optional[dict
     Returns {pool_number, fencers, rows} or None if no valid table found.
     """
     table = next(
-        (t for t in soup.find_all("table") if _BOUT_CELL.search(t.get_text())),
+        (t for t in soup.find_all("table") if re.search(r'[VD]\d', t.get_text())),
         None,
     )
     if not table:

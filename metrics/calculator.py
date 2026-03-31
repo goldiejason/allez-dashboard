@@ -233,6 +233,41 @@ def calc_new_vs_repeat(pool_bouts: list[dict]) -> dict:
     }
 
 
+def calc_resilience_score(pool_bouts: list[dict]) -> dict:
+    """
+    Resilience: win rate in the bout immediately following a loss, within the same event.
+
+    Shows whether an athlete can bounce back after being beaten in a pool.
+    A high score (>60%) indicates psychological resilience; a low score (<40%) suggests
+    losses have a snowball effect.
+
+    Returns:
+      resilience_pct   — % of bouts that follow a loss and are won
+      bounce_back_n    — total number of bouts that follow a loss (sample size)
+      bounce_back_wins — how many of those were wins
+    """
+    from collections import defaultdict
+    by_event: dict[str, list] = defaultdict(list)
+    for bout in pool_bouts:
+        by_event[bout["event_id"]].append(bout)
+
+    bounce_backs: list[bool] = []
+    for bouts in by_event.values():
+        ordered = sorted(bouts, key=lambda b: b.get("bout_order", 0))
+        for i, bout in enumerate(ordered[:-1]):
+            if not bout["result"]:                    # this bout was a loss
+                bounce_backs.append(ordered[i + 1]["result"])
+
+    if not bounce_backs:
+        return {}
+
+    return {
+        "resilience_pct":   round(sum(bounce_backs) / len(bounce_backs) * 100, 1),
+        "bounce_back_n":    len(bounce_backs),
+        "bounce_back_wins": sum(bounce_backs),
+    }
+
+
 def calc_volatility(events: list[dict], pool_bouts: list[dict]) -> dict:
     """
     Event-to-event volatility: standard deviation of pool win % per event.
@@ -352,8 +387,9 @@ def calc_all_metrics(athlete_id: str) -> dict:
         "month_stats": calc_monthly_performance(pool_bouts) if has_pool_data else {},
         "rivals":     calc_rivals(pool_bouts, de_bouts) if (has_pool_data or has_de_data) else [],
         "nvr":        calc_new_vs_repeat(pool_bouts)   if has_pool_data else {},
-        "volatility": calc_volatility(events, pool_bouts) if has_pool_data else {},
-        "trend":      calc_trend(events, pool_bouts)   if has_pool_data else {},
+        "volatility":  calc_volatility(events, pool_bouts)    if has_pool_data else {},
+        "trend":       calc_trend(events, pool_bouts)        if has_pool_data else {},
+        "resilience":  calc_resilience_score(pool_bouts)     if has_pool_data else {},
 
         # Raw bouts available for detailed views
         "pool_bouts": pool_bouts,
