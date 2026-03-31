@@ -544,6 +544,11 @@ def collect_athlete(athlete_id: str, name_ftl: str, force: bool = False) -> dict
 
     if not res.data:
         logger.info(f"No events with ftl_event_id found for athlete {athlete_id}")
+        # Still stamp last_refreshed so the dashboard shows an accurate
+        # "Data last updated" time even when there is nothing to collect yet.
+        db.table("athletes").update(
+            {"last_refreshed": datetime.now(timezone.utc).isoformat()}
+        ).eq("id", athlete_id).execute()
         return summary
 
     logger.info(f"Processing {len(res.data)} events for '{name_ftl}'")
@@ -631,3 +636,220 @@ def collect_all_athletes() -> dict:
         totals["errors"].extend(result["errors"])
 
     return totals
+
+
+# ── FTL-first weekend event discovery ─────────────────────────
+#
+# UK Ratings publishes competition history with a 3-7 day lag, so
+# weekend events will not appear until mid-week.  FTL has results
+# live during the competition itself.  This function scans FTL for
+# recent UK tournaments, checks whether any roster athletes competed,
+# and creates / links the event rows in the DB — so the dashboard
+# shows the result the same weekend it happened.
+#
+# Called automatically at the start of every weekend refresh.
+# Can also be run manually:
+#   python -c "from collectors.ftl_collector import discover_recent_ftl_events; discover_recent_ftl_events()"
+
+def discover_recent_ftl_events(days_back: int = 7, dry_run: bool = False) -> dict:
+    """
+    Scan FTL for GBR tournaments held in the last `days_back` days.
+    For each event, check if any active roster athlete competed and, if so,
+    create or link the event row in the DB with ftl_event_id set.
+
+    Returns {"tournaments_scanned", "events_linked", "errors"}.
+    """
+    import re as _re
+    from datetime import date as _Date, timedelta as _td
+
+    today     = _Date.today()
+    from_date = (today - _td(days=days_back)).isoformat()
+    to_date   = today.isoformat()
+
+    logger.info(
+        f"FTL recent discovery: GBR tournaments {from_date} → {to_date}"
+        + (" [DRY-RUN]" if dry_run else "")
+    )
+
+    db = get_write_client()
+
+    # ── Load active roster ─────────────────────────────────────────
+    roster = db.table("athletes")\
+        .select("id, name_display, name_ftl, weapon")\
+        .eq("active", True)\
+        .not_.is_("name_ftl", "null")\
+        .execute().data or []
+
+    if not roster:
+        logger.warning("  No active athletes with name_ftl — skipping discovery")
+        return {"tournaments_scanned": 0, "events_linked": 0, "errors": []}
+
+    # Surname → [athlete, ...] for O(1) first-pass filtering
+    by_surname: dict[str, list] = {}
+    for a in roster:
+        sur = a["name_ftl"].split()[0].upper()
+        by_surname.setdefault(sur, []).append(a)
+
+    summary: dict = {"tournaments_scanned": 0, "events_linked": 0, "errors": []}
+
+    # ── Search FTL for recent UK tournaments ───────────────────────
+    search_url = (
+        f"{FTL_BASE}/tournaments/search/data/advanced"
+        f"?from={from_date}&to={to_date}&country=GBR"
+    )
+    tournaments = _get_json(search_url)
+    if not isinstance(tournaments, list):
+        logger.warning("  FTL tournament search returned no data — skipping")
+        return summary
+
+    logger.info(f"  {len(tournaments)} GBR tournament(s) in window")
+    summary["tournaments_scanned"] = len(tournaments)
+
+    # ── Cache existing DB tournaments keyed by ftl_tournament_id ──
+    existing_t: dict[str, str] = {
+        row["ftl_tournament_id"]: row["id"]
+        for row in (
+            db.table("tournaments")
+              .select("id, ftl_tournament_id")
+              .not_.is_("ftl_tournament_id", "null")
+              .execute().data or []
+        )
+    }
+
+    for t in tournaments:
+        ftl_tid = t.get("id", "")
+        t_name  = t.get("name", "")
+        t_start = (t.get("start") or "")[:10]
+
+        if not ftl_tid or not t_name:
+            continue
+
+        # ── Fetch event schedule ───────────────────────────────────
+        sched = _get_html(f"{FTL_BASE}/tournaments/eventSchedule/{ftl_tid}")
+        if not sched:
+            continue
+
+        ftl_events = []
+        for tr in sched.find_all("tr", id=_re.compile(r"^ev_", _re.I)):
+            eid   = tr["id"][3:].upper()
+            cells = [td.get_text(" ", strip=True) for td in tr.find_all("td")]
+            ename = cells[1] if len(cells) >= 2 else ""
+            if eid and ename:
+                ftl_events.append({"ftl_event_id": eid, "name": ename})
+
+        if not ftl_events:
+            continue
+
+        # ── For each event, check participant list ─────────────────
+        for fe in ftl_events:
+            ftl_eid = fe["ftl_event_id"]
+            fe_name = fe["name"]
+
+            participants = _get_json(
+                f"{FTL_BASE}/events/results/data/{ftl_eid}"
+            )
+            if not isinstance(participants, list) or not participants:
+                continue
+
+            # Match participants against roster
+            matched: list[dict] = []
+            seen_ids: set[str] = set()
+            for p in participants:
+                p_name = (p.get("name") or "").strip()
+                if not p_name:
+                    continue
+                sur = p_name.split()[0].upper()
+                for athlete in by_surname.get(sur, []):
+                    if (athlete["id"] not in seen_ids
+                            and _name_matches(p_name, athlete["name_ftl"])):
+                        matched.append(athlete)
+                        seen_ids.add(athlete["id"])
+
+            if not matched:
+                continue
+
+            names = ", ".join(a["name_display"] for a in matched)
+            logger.info(
+                f"  ✓ '{t_name}' / '{fe_name}' — "
+                f"{len(matched)} athlete(s): {names}"
+            )
+
+            if dry_run:
+                continue
+
+            # ── Ensure tournament row exists ───────────────────────
+            db_tid = existing_t.get(ftl_tid)
+            if not db_tid:
+                try:
+                    res = db.table("tournaments").insert({
+                        "name":              t_name,
+                        "ftl_tournament_id": ftl_tid,
+                        "date_start":        t_start or None,
+                        "country":           "GBR",
+                    }).execute()
+                    db_tid = res.data[0]["id"]
+                    existing_t[ftl_tid] = db_tid
+                    logger.info(f"    Created tournament '{t_name}' → {db_tid[:8]}…")
+                except Exception as exc:
+                    logger.error(f"    Failed to create tournament '{t_name}': {exc}")
+                    summary["errors"].append(str(exc))
+                    continue
+
+            # ── Ensure event row per matched athlete ───────────────
+            for athlete in matched:
+                aid = athlete["id"]
+                try:
+                    existing_ev = db.table("events")\
+                        .select("id, ftl_event_id")\
+                        .eq("athlete_id", aid)\
+                        .eq("tournament_id", db_tid)\
+                        .execute().data
+
+                    if existing_ev:
+                        ev = existing_ev[0]
+                        if ev.get("ftl_event_id"):
+                            # Already linked — nothing to do
+                            logger.debug(
+                                f"    {athlete['name_display']}: "
+                                f"event already linked — skip"
+                            )
+                        else:
+                            # Link FTL ID onto existing UK-Ratings-created row
+                            db.table("events").update({
+                                "ftl_event_id": ftl_eid,
+                                "date":         t_start or None,
+                            }).eq("id", ev["id"]).execute()
+                            logger.info(
+                                f"    {athlete['name_display']}: "
+                                f"linked ftl_event_id on existing row"
+                            )
+                            summary["events_linked"] += 1
+                    else:
+                        # Create a brand-new event row from FTL data
+                        db.table("events").insert({
+                            "athlete_id":    aid,
+                            "tournament_id": db_tid,
+                            "event_name":    fe_name,
+                            "ftl_event_id":  ftl_eid,
+                            "date":          t_start or None,
+                        }).execute()
+                        logger.info(
+                            f"    {athlete['name_display']}: "
+                            f"created event '{fe_name}'"
+                        )
+                        summary["events_linked"] += 1
+
+                except Exception as exc:
+                    logger.error(
+                        f"    Error linking event for "
+                        f"{athlete['name_display']}: {exc}"
+                    )
+                    summary["errors"].append(str(exc))
+
+    logger.info(
+        f"FTL discovery complete — "
+        f"tournaments_scanned={summary['tournaments_scanned']}, "
+        f"events_linked={summary['events_linked']}, "
+        f"errors={len(summary['errors'])}"
+    )
+    return summary

@@ -18,7 +18,7 @@ from datetime import datetime, timezone, timedelta
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from database.client import get_write_client, get_read_client
-from collectors.ftl_collector import collect_athlete
+from collectors.ftl_collector import collect_athlete, discover_recent_ftl_events
 from collectors.ukratings_collector import collect_athlete as collect_ukratings
 
 logging.basicConfig(
@@ -46,6 +46,24 @@ def should_skip(last_refreshed: str | None) -> bool:
 
 
 def main():
+    # ── Step 1: FTL-first event discovery ─────────────────────────
+    # Scan FTL for UK tournaments in the last 7 days and create/link any
+    # events where our athletes competed.  This ensures same-weekend events
+    # appear in the dashboard before UK Ratings publishes its results
+    # (UK Ratings typically has a 3-7 day publishing lag).
+    logger.info("── Step 1: FTL recent event discovery")
+    try:
+        disc = discover_recent_ftl_events(days_back=7)
+        logger.info(
+            f"Discovery: {disc['tournaments_scanned']} tournaments scanned, "
+            f"{disc['events_linked']} events linked, "
+            f"{len(disc['errors'])} errors"
+        )
+    except Exception as exc:
+        logger.error(f"FTL discovery step failed: {exc}")
+
+    # ── Step 2: Per-athlete FTL + UK Ratings refresh ───────────────
+    logger.info("── Step 2: Per-athlete FTL + UK Ratings refresh")
     db_read = get_read_client()
 
     athletes = db_read.table("athletes").select(
