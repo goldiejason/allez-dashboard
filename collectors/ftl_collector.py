@@ -348,131 +348,126 @@ def fetch_pool_stats(ftl_event_id: str, pool_id_seed: str, name_ftl: str) -> Opt
 
 
 # ── Pool bout collection ───────────────────────────────────────
+#
+# FTL pool scores API (reverse-engineered via browser network analysis):
+#
+#   GET /pools/scores/{event_id}/{pool_id_seed}
+#       Returns an HTML page with an inline JS array:  var ids = ["GUID1", "GUID2", ...];
+#       One GUID per pool in the event.
+#
+#   GET /pools/scores/{event_id}/{pool_id_seed}/{pool_id}?dbut=true
+#       Returns an HTML fragment for ONE specific pool — the full bout matrix.
+#       Cell format: "V5" = victory 5 scored, "D3" = defeat 3 scored.
+#       Cell index formula (verified): row_i[opp_pos + 1] = fencer i's bout vs opp_pos.
+#
+# No socket.io, no Playwright. Pure authenticated HTTP.
 
-def _parse_pools_page(soup: BeautifulSoup) -> list[dict]:
+
+def _discover_pool_ids(ftl_event_id: str, pool_id_seed: str) -> list[str]:
     """
-    Parse all pool tables from a /pools/scores/{event_id}/{pool_id} page.
-
-    One request returns ALL pools in the event. Each pool table is a matrix
-    where cell[opp_pos + 1] in row i gives fencer i's bout vs fencer opp_pos.
-
-    Returns a list of pool dicts:
-      {pool_number, fencers: {pos: {name, club, country}}, rows: {pos: [cells]}}
+    Fetch the pool scores landing page and extract all pool IDs from
+    the inline JS  var ids = [...]  array.
     """
-    pools = []
-    bout_tables = [t for t in soup.find_all("table") if _BOUT_CELL.search(t.get_text())]
+    url = f"{FTL_BASE}/pools/scores/{ftl_event_id}/{pool_id_seed}"
+    soup = _get_html(url)
+    if not soup:
+        return []
+    for script in soup.find_all("script"):
+        text = script.string or ""
+        if "var ids" in text:
+            m = re.search(r"var ids\s*=\s*\[([\s\S]*?)\]", text)
+            if m:
+                return re.findall(r"[A-F0-9]{32}", m.group(1), re.I)
+    return []
 
-    for pool_num, table in enumerate(bout_tables, 1):
-        rows = table.find_all("tr")
-        if len(rows) < 2:
+
+def _parse_pool_fragment(soup: BeautifulSoup, pool_number: int) -> Optional[dict]:
+    """
+    Parse the HTML fragment from /pools/scores/.../pool_id?dbut=true.
+    Returns {pool_number, fencers, rows} or None if no valid table found.
+    """
+    table = next(
+        (t for t in soup.find_all("table") if _BOUT_CELL.search(t.get_text())),
+        None,
+    )
+    if not table:
+        return None
+
+    fencers: dict[int, dict] = {}
+    row_cells: dict[int, list[str]] = {}
+
+    for row in table.find_all("tr")[1:]:  # skip header
+        cells = [td.get_text("\n", strip=True) for td in row.find_all(["td", "th"])]
+        if len(cells) < 3:
             continue
-
-        fencers: dict[int, dict] = {}
-        row_cells: dict[int, list[str]] = {}
-
-        for row in rows[1:]:  # skip header
-            cells = [td.get_text("\n", strip=True) for td in row.find_all(["td", "th"])]
-            if len(cells) < 3:
-                continue
-
-            # Cell 0: "NAME Firstname\nCLUB /  GBR"
-            lines = [l.strip() for l in cells[0].split("\n") if l.strip()]
-            if not lines:
-                continue
-            fencer_name = lines[0]
-            club, country = "", "GBR"
-            if len(lines) > 1:
-                club_raw = lines[1]
-                if "/" in club_raw:
-                    club_part, country_part = club_raw.rsplit("/", 1)
-                    club = club_part.strip()
-                    country = country_part.strip() or "GBR"
-                else:
-                    club = club_raw.strip()
-
-            # Cell 1: pool position number (1-based)
-            try:
-                pos = int(cells[1])
-            except (ValueError, IndexError):
-                continue
-
-            fencers[pos] = {"name": fencer_name, "club": club, "country": country}
-            row_cells[pos] = cells
-
-        if fencers:
-            pools.append({"pool_number": pool_num, "fencers": fencers, "rows": row_cells})
-
-    return pools
-
-
-def _extract_bouts_for_athlete(pools: list[dict], name_ftl: str) -> list[dict]:
-    """
-    Find the athlete in the parsed pool tables and extract their individual bouts.
-
-    For athlete at pool position i, bout vs opponent at position j:
-      ts  = numeric part of row_i[j + 1]  (e.g. "V5" → 5)
-      tr  = numeric part of row_j[i + 1]  (opponent's reverse cell)
-      result = True if row_i[j + 1] starts with "V"
-
-    Returns a list of bout dicts (without event_id — caller adds that).
-    """
-    for pool in pools:
-        fencers = pool["fencers"]
-        row_cells = pool["rows"]
-
-        # Locate our athlete by name
-        our_pos = next(
-            (pos for pos, f in fencers.items() if _name_matches(f["name"], name_ftl)),
-            None,
-        )
-        if our_pos is None:
+        lines = [ln.strip() for ln in cells[0].split("\n") if ln.strip()]
+        if not lines:
             continue
+        fencer_name = lines[0]
+        club, country = "", "GBR"
+        if len(lines) > 1:
+            club_raw = lines[1]
+            if "/" in club_raw:
+                cp, ctp = club_raw.rsplit("/", 1)
+                club, country = cp.strip(), ctp.strip() or "GBR"
+            else:
+                club = club_raw.strip()
+        try:
+            pos = int(cells[1])
+        except (ValueError, IndexError):
+            continue
+        fencers[pos] = {"name": fencer_name, "club": club, "country": country}
+        row_cells[pos] = cells
 
-        our_row = row_cells[our_pos]
-        bouts = []
-        bout_order = 0
+    return {"pool_number": pool_number, "fencers": fencers, "rows": row_cells} if fencers else None
 
-        for opp_pos in sorted(fencers):
-            if opp_pos == our_pos:
-                continue
 
-            bout_order += 1
-            cell_idx = opp_pos + 1  # verified: cell[opp_pos + 1] = bout vs that opponent
+def _extract_bouts_from_pool(pool: dict, name_ftl: str) -> Optional[list[dict]]:
+    """
+    Find the athlete in a parsed pool and extract their individual bouts.
+    Returns a list of bout dicts, or None if the athlete is not in this pool.
 
-            if cell_idx >= len(our_row):
-                continue
+    For athlete at position i vs opponent at position j:
+      ts  = numeric part of row_i[j+1]   (touches our athlete scored)
+      tr  = numeric part of row_j[i+1]   (touches opponent scored = we received)
+      result = True if the cell starts with "V"
+    """
+    fencers, row_cells = pool["fencers"], pool["rows"]
+    our_pos = next(
+        (pos for pos, f in fencers.items() if _name_matches(f["name"], name_ftl)), None
+    )
+    if our_pos is None:
+        return None
 
-            m = _BOUT_CELL.match(our_row[cell_idx].strip())
-            if not m:
-                continue  # BYE or missing
+    our_row = row_cells[our_pos]
+    bouts, bout_order = [], 0
 
-            ts = int(m.group(2))
-            result = m.group(1) == "V"
-
-            # tr = touches the opponent scored against us (their cell pointing back at us)
-            tr = 0
-            opp_row = row_cells.get(opp_pos, [])
-            our_cell_idx = our_pos + 1
-            if our_cell_idx < len(opp_row):
-                m2 = _BOUT_CELL.match(opp_row[our_cell_idx].strip())
-                if m2:
-                    tr = int(m2.group(2))
-
-            opp = fencers[opp_pos]
-            bouts.append({
-                "pool_number":      pool["pool_number"],
-                "bout_order":       bout_order,
-                "opponent_name":    opp["name"],
-                "opponent_club":    opp["club"],
-                "opponent_country": opp["country"] or "GBR",
-                "ts":               ts,
-                "tr":               tr,
-                "result":           result,
-            })
-
-        return bouts  # found the athlete's pool — done
-
-    return []  # athlete not found in any pool
+    for opp_pos in sorted(fencers):
+        if opp_pos == our_pos:
+            continue
+        bout_order += 1
+        cell_idx = opp_pos + 1
+        if cell_idx >= len(our_row):
+            continue
+        m = _BOUT_CELL.match(our_row[cell_idx].strip())
+        if not m:
+            continue
+        ts, result = int(m.group(2)), m.group(1) == "V"
+        tr = 0
+        opp_row = row_cells.get(opp_pos, [])
+        m2 = _BOUT_CELL.match(opp_row[our_pos + 1].strip()) if our_pos + 1 < len(opp_row) else None
+        if m2:
+            tr = int(m2.group(2))
+        opp = fencers[opp_pos]
+        bouts.append({
+            "pool_number":      pool["pool_number"],
+            "bout_order":       bout_order,
+            "opponent_name":    opp["name"],
+            "opponent_club":    opp["club"],
+            "opponent_country": opp["country"] or "GBR",
+            "ts": ts, "tr": tr, "result": result,
+        })
+    return bouts
 
 
 def collect_pool_bouts_for_event(
@@ -483,34 +478,39 @@ def collect_pool_bouts_for_event(
     name_ftl: str,
 ) -> dict:
     """
-    Fetch the pool scores page for one event and write individual bouts to Supabase.
+    Collect individual pool bouts for one event and write them to Supabase.
 
-    Skips silently if bouts already exist for this event (idempotent on re-runs).
-    Returns {inserted, skipped, error}.
+    1. Skip if bouts already exist (idempotent on re-runs)
+    2. Fetch landing page → extract all pool IDs from var ids = [...]
+    3. Fetch each pool fragment (?dbut=true) until the athlete is found
+    4. Parse bout matrix → write to pool_bouts table
     """
-    # Skip if bouts already collected
     existing = db.table("pool_bouts").select("id").eq("event_id", event_db_id).limit(1).execute()
     if existing.data:
         return {"inserted": 0, "skipped": True, "error": None}
 
-    url = f"{FTL_BASE}/pools/scores/{ftl_event_id}/{pool_id_seed}"
-    soup = _get_html(url)
-    if not soup:
-        return {"inserted": 0, "skipped": False, "error": "Failed to fetch pool scores page"}
+    pool_ids = _discover_pool_ids(ftl_event_id, pool_id_seed)
+    if not pool_ids:
+        return {"inserted": 0, "skipped": False, "error": "No pool IDs found in page JS"}
 
-    pools = _parse_pools_page(soup)
-    if not pools:
-        return {"inserted": 0, "skipped": False, "error": "No pool tables found on page"}
+    surname = name_ftl.split()[0].upper()
 
-    bouts = _extract_bouts_for_athlete(pools, name_ftl)
-    if not bouts:
-        return {"inserted": 0, "skipped": False, "error": f"Athlete '{name_ftl}' not found in any pool"}
+    for pool_num, pool_id in enumerate(pool_ids, 1):
+        url = f"{FTL_BASE}/pools/scores/{ftl_event_id}/{pool_id_seed}/{pool_id}?dbut=true"
+        soup = _get_html(url)
+        if not soup or surname not in soup.get_text().upper():
+            continue
+        pool = _parse_pool_fragment(soup, pool_num)
+        if not pool:
+            continue
+        bouts = _extract_bouts_from_pool(pool, name_ftl)
+        if bouts is None:
+            continue
+        rows = [{**b, "event_id": event_db_id} for b in bouts]
+        db.table("pool_bouts").insert(rows).execute()
+        return {"inserted": len(bouts), "skipped": False, "error": None}
 
-    # Attach event_id to each bout and insert
-    rows = [{**b, "event_id": event_db_id} for b in bouts]
-    db.table("pool_bouts").insert(rows).execute()
-
-    return {"inserted": len(rows), "skipped": False, "error": None}
+    return {"inserted": 0, "skipped": False, "error": f"'{name_ftl}' not found in any of {len(pool_ids)} pools"}
 
 
 # ── Main collection pipeline ───────────────────────────────────
