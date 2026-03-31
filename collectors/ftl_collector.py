@@ -791,33 +791,31 @@ def discover_recent_ftl_events(days_back: int = 7, dry_run: bool = False) -> dic
                     existing_t[ftl_tid] = db_tid
                     logger.info(f"    Created tournament '{t_name}' → {db_tid[:8]}…")
                 except Exception as exc:
-                    # If the tournament already exists by name (UK Ratings created it
-                    # before FTL could), look it up by name and patch ftl_tournament_id.
+                    # The only 23505 conflict possible is on ftl_tournament_id
+                    # (name uniqueness was replaced with a (name, date_start) composite).
+                    # If the tournament was already inserted by a concurrent process,
+                    # look it up by ftl_tournament_id so event linking can continue.
                     exc_str = str(exc)
                     if "23505" in exc_str or "duplicate" in exc_str.lower():
                         try:
                             existing = db.table("tournaments")\
                                 .select("id")\
-                                .eq("name", t_name)\
+                                .eq("ftl_tournament_id", ftl_tid)\
                                 .execute().data
                             if existing:
                                 db_tid = existing[0]["id"]
-                                db.table("tournaments").update({
-                                    "ftl_tournament_id": ftl_tid,
-                                    "date_start":        t_start or None,
-                                }).eq("id", db_tid).execute()
                                 existing_t[ftl_tid] = db_tid
                                 logger.info(
-                                    f"    Patched ftl_tournament_id on existing "
-                                    f"'{t_name}' → {db_tid[:8]}…"
+                                    f"    Tournament '{t_name}' already exists "
+                                    f"(ftl_id conflict) → reusing {db_tid[:8]}…"
                                 )
                             else:
-                                logger.error(f"    Cannot find existing tournament '{t_name}' by name")
+                                logger.error(f"    Duplicate error but cannot find '{t_name}' by ftl_id")
                                 summary["errors"].append(exc_str)
                                 continue
-                        except Exception as patch_exc:
-                            logger.error(f"    Failed to patch tournament '{t_name}': {patch_exc}")
-                            summary["errors"].append(str(patch_exc))
+                        except Exception as lookup_exc:
+                            logger.error(f"    Failed to look up tournament '{t_name}': {lookup_exc}")
+                            summary["errors"].append(str(lookup_exc))
                             continue
                     else:
                         logger.error(f"    Failed to create tournament '{t_name}': {exc}")
