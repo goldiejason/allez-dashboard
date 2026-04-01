@@ -106,10 +106,10 @@ def _render_pool_tab(pool: dict, pool_bouts: list, volatility: dict, resilience:
             return
         st.caption("_Aggregated from event pool totals — individual bout breakdown available after Phase 2._")
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Pool Win %",         f"{event_pool.get('pool_win_pct')}%")
-        c2.metric("Touch Diff",          event_pool.get("touch_diff"))
-        c3.metric("Touch Diff / Bout",   event_pool.get("touch_diff_per_bout"))
-        c4.metric("Advanced to DE %",   f"{event_pool.get('advanced_to_de_pct')}%")
+        c1.metric("Pool Win %",         f"{event_pool.get('pool_win_pct') or '—'}%")
+        c2.metric("Touch Diff",          event_pool.get("touch_diff") if event_pool.get("touch_diff") is not None else "—")
+        c3.metric("Touch Diff / Bout",   event_pool.get("touch_diff_per_bout") or "—")
+        c4.metric("Advanced to DE %",   f"{event_pool.get('advanced_to_de_pct') or '—'}%")
 
         # Pool win% per event bar chart
         valid = sorted(
@@ -199,7 +199,7 @@ def _render_pool_tab(pool: dict, pool_bouts: list, volatility: dict, resilience:
                          reverse=True):
             ev = b.get("events") or {}
             bout_rows.append({
-                "Date":     ev.get("date", "—"),
+                "Date":     ev.get("date") or "—",
                 "Event":    ev.get("event_name", "—"),
                 "Opponent": b.get("opponent_name", "—"),
                 "Club":     b.get("opponent_club", "—"),
@@ -460,7 +460,7 @@ with col_h1:
     st.title(f"{weapon_emoji} {selected_name}")
     if athlete:
         st.caption(
-            f"{athlete.get('age_category', '')} · "
+            f"{athlete.get('age_category') or ''} · "
             f"{athlete.get('weapon', '').capitalize()} · "
             f"{athlete.get('club') or 'Allez Fencing'}"
         )
@@ -510,6 +510,7 @@ tab_events, tab_pool, tab_de, tab_rivals, tab_monthly, tab_coaching = st.tabs([
 
 with tab_events:
     _render_event_history(events)
+    _render_annual_stats(metrics.get("annual_stats", []))
 
 with tab_pool:
     _render_pool_tab(pool, metrics.get("pool_bouts", []), metrics.get("volatility", {}), metrics.get("resilience", {}), events)
