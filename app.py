@@ -173,7 +173,7 @@ def _render_pool_tab(pool: dict, pool_bouts: list, volatility: dict, resilience:
             else "fewer than 5 scored events"
         )
         st.caption(
-            f"Consistency: SD {volatility.get('career_sd')}% career · {recent_sd_str}"
+            f"Consistency: SD {_coerce(volatility.get('career_sd'))}% career · {recent_sd_str}"
         )
 
     # ── Per-event touch diff chart ───────────────────────────────
