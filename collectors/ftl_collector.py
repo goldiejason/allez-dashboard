@@ -791,12 +791,17 @@ def discover_recent_ftl_events(days_back: int = 7, dry_run: bool = False) -> dic
                     existing_t[ftl_tid] = db_tid
                     logger.info(f"    Created tournament '{t_name}' → {db_tid[:8]}…")
                 except Exception as exc:
-                    # The only 23505 conflict possible is on ftl_tournament_id
-                    # (name uniqueness was replaced with a (name, date_start) composite).
-                    # If the tournament was already inserted by a concurrent process,
-                    # look it up by ftl_tournament_id so event linking can continue.
+                    # 23505 = unique constraint violation.
+                    # Fallback strategy (two attempts):
+                    #   1. Look up by ftl_tournament_id (covers concurrent inserts)
+                    #   2. Look up by (name, date_start) — covers the case where
+                    #      the row was manually inserted with a different ftl_tournament_id
+                    #      than what FTL's search API returns.  If found, patch the
+                    #      ftl_tournament_id so future runs hit the cache correctly.
                     exc_str = str(exc)
                     if "23505" in exc_str or "duplicate" in exc_str.lower():
+                        found_via_fallback = False
+                        # Attempt 1: look up by ftl_tournament_id
                         try:
                             existing = db.table("tournaments")\
                                 .select("id")\
@@ -807,15 +812,44 @@ def discover_recent_ftl_events(days_back: int = 7, dry_run: bool = False) -> dic
                                 existing_t[ftl_tid] = db_tid
                                 logger.info(
                                     f"    Tournament '{t_name}' already exists "
-                                    f"(ftl_id conflict) → reusing {db_tid[:8]}…"
+                                    f"(ftl_id match) → reusing {db_tid[:8]}…"
                                 )
-                            else:
-                                logger.error(f"    Duplicate error but cannot find '{t_name}' by ftl_id")
-                                summary["errors"].append(exc_str)
-                                continue
-                        except Exception as lookup_exc:
-                            logger.error(f"    Failed to look up tournament '{t_name}': {lookup_exc}")
-                            summary["errors"].append(str(lookup_exc))
+                                found_via_fallback = True
+                        except Exception:
+                            pass
+
+                        # Attempt 2: look up by (name, date_start) — handles
+                        # mismatched ftl_tournament_id from manual inserts
+                        if not found_via_fallback and t_start:
+                            try:
+                                existing = db.table("tournaments")\
+                                    .select("id")\
+                                    .eq("name", t_name)\
+                                    .eq("date_start", t_start)\
+                                    .execute().data
+                                if existing:
+                                    db_tid = existing[0]["id"]
+                                    existing_t[ftl_tid] = db_tid
+                                    # Patch the stored ftl_tournament_id so the cache
+                                    # hits on future runs
+                                    db.table("tournaments").update(
+                                        {"ftl_tournament_id": ftl_tid}
+                                    ).eq("id", db_tid).execute()
+                                    logger.info(
+                                        f"    Tournament '{t_name}' found by (name, date_start) "
+                                        f"→ reusing {db_tid[:8]}… and patching ftl_tournament_id"
+                                    )
+                                    found_via_fallback = True
+                            except Exception as lookup_exc:
+                                logger.error(
+                                    f"    (name, date_start) fallback failed for '{t_name}': {lookup_exc}"
+                                )
+
+                        if not found_via_fallback:
+                            logger.error(
+                                f"    Duplicate error — cannot find '{t_name}' by ftl_id or (name, date_start)"
+                            )
+                            summary["errors"].append(exc_str)
                             continue
                     else:
                         logger.error(f"    Failed to create tournament '{t_name}': {exc}")
