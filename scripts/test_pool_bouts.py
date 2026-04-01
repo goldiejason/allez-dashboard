@@ -11,6 +11,7 @@ Tests against Daniel Panga only:
 Usage:
   python scripts/test_pool_bouts.py          # dry run (no DB write)
   python scripts/test_pool_bouts.py --write  # write bouts to Supabase
+  python scripts/test_pool_bouts.py --debug  # verbose cell-level diagnostics
 """
 
 import sys
@@ -34,13 +35,57 @@ from collectors.ftl_collector import (
     _discover_pool_ids,
     _parse_pool_fragment,
     _extract_bouts_from_pool,
+    _BOUT_CELL,
     FTL_BASE,
 )
+
+
+def debug_fragment(soup, pool_num, pool_id, athlete_name):
+    """Dump raw cell structure from a pool fragment so we can diagnose parse failures."""
+    tables = soup.find_all("table")
+    logger.info(f"  [DEBUG] Pool #{pool_num} ({pool_id[:8]}...) — {len(tables)} table(s) in fragment")
+
+    bout_tables = [t for t in tables if _BOUT_CELL.search(t.get_text())]
+    logger.info(f"  [DEBUG] Tables with bout cells (V/D pattern): {len(bout_tables)}")
+
+    if not bout_tables:
+        # Show first table raw text for clues
+        for i, t in enumerate(tables[:2]):
+            rows = t.find_all("tr")
+            logger.info(f"  [DEBUG] Table {i}: {len(rows)} rows — text preview: {t.get_text()[:200]!r}")
+        return
+
+    t = bout_tables[0]
+    rows = t.find_all("tr")
+    logger.info(f"  [DEBUG] Bout table: {len(rows)} rows (including header)")
+    for j, row in enumerate(rows):
+        cells = [td.get_text("\n", strip=True) for td in row.find_all(["td", "th"])]
+        logger.info(f"  [DEBUG]   Row {j}: {cells}")
+
+    # Also show what _parse_pool_fragment extracted
+    pool = _parse_pool_fragment(soup, pool_num)
+    if pool is None:
+        logger.info("  [DEBUG] _parse_pool_fragment → None (no fencers parsed)")
+        return
+
+    logger.info(f"  [DEBUG] _parse_pool_fragment → {len(pool['fencers'])} fencer(s):")
+    for pos, f in sorted(pool["fencers"].items()):
+        logger.info(f"  [DEBUG]   pos={pos}  name={f['name']!r}  club={f['club']!r}  country={f['country']!r}")
+
+    # Check if athlete name matches any fencer
+    surname = athlete_name.split()[0].upper()
+    target_words = set(athlete_name.upper().split())
+    for pos, f in sorted(pool["fencers"].items()):
+        row_words = set(f["name"].upper().split())
+        match = target_words.issubset(row_words)
+        if surname in row_words or match:
+            logger.info(f"  [DEBUG]   → Name match candidate: pos={pos} name={f['name']!r} match={match}")
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--write", action="store_true", help="Write bouts to Supabase")
+    parser.add_argument("--debug", action="store_true", help="Verbose cell-level diagnostics")
     args = parser.parse_args()
 
     db = get_read_client()
@@ -52,7 +97,7 @@ def main():
         sys.exit(1)
 
     athlete = athletes[0]
-    logger.info(f"Athlete: {athlete['name_display']} | name_ftl={athlete['name_ftl']}")
+    logger.info(f"Athlete: {athlete['name_display']} | name_ftl={athlete['name_ftl']!r}")
 
     # Get events with pool_id_seed
     events = (
@@ -93,22 +138,41 @@ def main():
         surname = athlete["name_ftl"].split()[0].upper()
         bouts = None
         found_pool_num = None
+
         for pool_num, pool_id in enumerate(pool_ids, 1):
             frag_url = f"{FTL_BASE}/pools/scores/{event['ftl_event_id']}/{event['pool_id_seed']}/{pool_id}?dbut=true"
             soup = _get_html(frag_url)
-            if not soup or surname not in soup.get_text().upper():
+
+            has_surname = soup and surname in soup.get_text().upper()
+            logger.info(f"  Pool #{pool_num} ({pool_id[:8]}...)  surname_found={has_surname}")
+
+            if not soup or not has_surname:
                 continue
+
+            if args.debug:
+                debug_fragment(soup, pool_num, pool_id, athlete["name_ftl"])
+
             pool = _parse_pool_fragment(soup, pool_num)
             if not pool:
+                logger.warning(f"  Pool #{pool_num}: _parse_pool_fragment returned None")
                 continue
+
+            logger.info(f"  Pool #{pool_num}: parsed {len(pool['fencers'])} fencer(s) — {list(pool['fencers'].items())[:3]}")
+
             bouts = _extract_bouts_from_pool(pool, athlete["name_ftl"])
             if bouts is not None:
                 found_pool_num = pool_num
                 break
+            else:
+                logger.warning(
+                    f"  Pool #{pool_num}: athlete not found in fencers dict — "
+                    f"names={[f['name'] for f in pool['fencers'].values()]}"
+                )
 
         if bouts is None:
-
             logger.warning(f"Athlete '{athlete['name_ftl']}' not found in any of {len(pool_ids)} pools")
+            if not args.debug:
+                logger.info("Re-run with --debug for cell-level diagnostics")
             continue
 
         logger.info(f"Found athlete in pool #{found_pool_num}")
