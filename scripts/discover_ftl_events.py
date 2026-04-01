@@ -449,6 +449,7 @@ def main():
         logger.info(f"── {t_name} ({t_date})")
 
         # ── Step 1: Find FTL tournament ──────────────────────────
+        ftl_t = None   # initialised here so it's always defined below
         if t.get("ftl_tournament_id") and args.include_matched:
             # Already matched — skip search, use existing ID
             ftl_tid  = t["ftl_tournament_id"]
@@ -468,6 +469,11 @@ def main():
                 f"   Tournament: '{ftl_name}'  score={score:.2f}  id={ftl_tid[:8]}…"
             )
 
+        # Start date from FTL (available only in the new-match branch where ftl_t is set)
+        ftl_start: Optional[str] = (ftl_t.get("start") or "")[:10] or None if ftl_t else None
+        # Best date for events: prefer the DB tournament's known date_start, else FTL start
+        event_date: Optional[str] = t_date or ftl_start or None
+
         # ── Step 2: Load unmatched DB events ─────────────────────
         evq = db.table("events")\
             .select("id, event_name, ftl_event_id, date")\
@@ -478,9 +484,10 @@ def main():
         if not db_events:
             logger.info(f"   Events: all already matched — skipping event step")
             if args.apply and not t.get("ftl_tournament_id"):
-                db.table("tournaments").update(
-                    {"ftl_tournament_id": ftl_tid}
-                ).eq("id", t["id"]).execute()
+                upd: dict = {"ftl_tournament_id": ftl_tid}
+                if ftl_start and not t.get("date_start"):
+                    upd["date_start"] = ftl_start
+                db.table("tournaments").update(upd).eq("id", t["id"]).execute()
             totals["t_matched"] += 1
             continue
 
@@ -577,11 +584,14 @@ def main():
 
         # ── Step 5: Apply if requested ────────────────────────────
         if args.apply:
-            # Update tournament
+            # Update tournament — write ftl_tournament_id and date_start if missing
+            t_upd: dict = {}
             if not t.get("ftl_tournament_id"):
-                db.table("tournaments").update(
-                    {"ftl_tournament_id": ftl_tid}
-                ).eq("id", t["id"]).execute()
+                t_upd["ftl_tournament_id"] = ftl_tid
+            if ftl_start and not t.get("date_start"):
+                t_upd["date_start"] = ftl_start
+            if t_upd:
+                db.table("tournaments").update(t_upd).eq("id", t["id"]).execute()
 
             # Decide which match qualities to apply
             # "exact"         → always apply
@@ -619,9 +629,10 @@ def main():
                                 continue
                         except ValueError:
                             pass  # unparseable year — proceed with write
-                    db.table("events").update(
-                        {"ftl_event_id": ftl_eid}
-                    ).eq("id", ev["id"]).execute()
+                    ev_upd: dict = {"ftl_event_id": ftl_eid}
+                    if event_date and not ev.get("date"):
+                        ev_upd["date"] = event_date
+                    db.table("events").update(ev_upd).eq("id", ev["id"]).execute()
                     applied += 1
             skipped_partial = sum(
                 1 for m in matches

@@ -29,7 +29,7 @@ def fetch_events(athlete_id: str) -> list[dict]:
         db.table("events")
         .select("*, tournaments(name, country, is_international)")
         .eq("athlete_id", athlete_id)
-        .order("date", desc=True)
+        .order("date", desc=True, nullslast=True)
         .execute()
     )
     return res.data or []

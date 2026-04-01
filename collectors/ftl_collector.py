@@ -894,7 +894,7 @@ def discover_recent_ftl_events(days_back: int = 7, dry_run: bool = False) -> dic
                 aid = athlete["id"]
                 try:
                     existing_ev = db.table("events")\
-                        .select("id, ftl_event_id")\
+                        .select("id, ftl_event_id, date")\
                         .eq("athlete_id", aid)\
                         .eq("tournament_id", db_tid)\
                         .execute().data
@@ -903,11 +903,21 @@ def discover_recent_ftl_events(days_back: int = 7, dry_run: bool = False) -> dic
                         ev = existing_ev[0]
                         stored_eid = ev.get("ftl_event_id")
                         if stored_eid and stored_eid == ftl_eid:
-                            # Already linked with the correct canonical ID — nothing to do
-                            logger.debug(
-                                f"    {athlete['name_display']}: "
-                                f"event already linked — skip"
-                            )
+                            # Already linked with the correct canonical ID.
+                            # Backfill date if it is currently null and we have t_start.
+                            if t_start and not ev.get("date"):
+                                db.table("events").update(
+                                    {"date": t_start}
+                                ).eq("id", ev["id"]).execute()
+                                logger.info(
+                                    f"    {athlete['name_display']}: "
+                                    f"backfilled date={t_start} on already-linked event"
+                                )
+                            else:
+                                logger.debug(
+                                    f"    {athlete['name_display']}: "
+                                    f"event already linked — skip"
+                                )
                         elif stored_eid and stored_eid != ftl_eid:
                             # Stored ID differs from the FTL canonical ID — correct it
                             db.table("events").update({
