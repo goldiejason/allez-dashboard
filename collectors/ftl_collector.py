@@ -868,12 +868,25 @@ def discover_recent_ftl_events(days_back: int = 7, dry_run: bool = False) -> dic
 
                     if existing_ev:
                         ev = existing_ev[0]
-                        if ev.get("ftl_event_id"):
-                            # Already linked — nothing to do
+                        stored_eid = ev.get("ftl_event_id")
+                        if stored_eid and stored_eid == ftl_eid:
+                            # Already linked with the correct canonical ID — nothing to do
                             logger.debug(
                                 f"    {athlete['name_display']}: "
                                 f"event already linked — skip"
                             )
+                        elif stored_eid and stored_eid != ftl_eid:
+                            # Stored ID differs from the FTL canonical ID — correct it
+                            db.table("events").update({
+                                "ftl_event_id": ftl_eid,
+                                "date":         t_start or None,
+                            }).eq("id", ev["id"]).execute()
+                            logger.info(
+                                f"    {athlete['name_display']}: "
+                                f"corrected ftl_event_id "
+                                f"({stored_eid[:8]}… → {ftl_eid[:8]}…)"
+                            )
+                            summary["events_linked"] += 1
                         else:
                             # Link FTL ID onto existing UK-Ratings-created row
                             db.table("events").update({
