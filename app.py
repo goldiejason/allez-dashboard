@@ -40,7 +40,7 @@ def _render_event_history(events: list[dict]):
         field = ev.get("field_size")
         place_str = f"{place}/{field}" if place and field else (str(place) if place else "—")
         rows.append({
-            "Date":        ev.get("date", "—"),
+            "Date":        ev.get("date") or "—",
             "Tournament":  t.get("name", "—"),
             "Event":       ev.get("event_name", "—"),
             "Ctry":        flag,
@@ -148,9 +148,14 @@ def _render_pool_tab(pool: dict, pool_bouts: list, volatility: dict, resilience:
               help="Win rate in the bout immediately following a loss (same event). >60% = strong bounce-back.")
 
     if volatility:
+        recent_sd = volatility.get("recent_sd")
+        recent_sd_str = (
+            f"SD {recent_sd}% recent 5 events"
+            if recent_sd is not None
+            else "fewer than 5 scored events"
+        )
         st.caption(
-            f"Consistency: SD {volatility.get('career_sd')}% career · "
-            f"SD {volatility.get('recent_sd')}% recent 5 events"
+            f"Consistency: SD {volatility.get('career_sd')}% career · {recent_sd_str}"
         )
 
     # ── Per-event touch diff chart ───────────────────────────────
@@ -161,7 +166,7 @@ def _render_pool_tab(pool: dict, pool_bouts: list, volatility: dict, resilience:
         eid = b["event_id"]
         ev_map[eid]["ts"]   += b["ts"]
         ev_map[eid]["tr"]   += b["tr"]
-        ev_map[eid]["date"]  = ev.get("date", "")
+        ev_map[eid]["date"]  = ev.get("date") or ""
         ev_map[eid]["name"]  = ev.get("event_name", eid[:8])
 
     ev_sorted = sorted(ev_map.values(), key=lambda x: x["date"])
@@ -190,7 +195,7 @@ def _render_pool_tab(pool: dict, pool_bouts: list, volatility: dict, resilience:
     with st.expander(f"All pool bouts ({len(pool_bouts)} recorded)"):
         bout_rows = []
         for b in sorted(pool_bouts,
-                         key=lambda x: ((x.get("events") or {}).get("date", ""), x.get("bout_order", 0)),
+                         key=lambda x: ((x.get("events") or {}).get("date") or "", x.get("bout_order", 0)),
                          reverse=True):
             ev = b.get("events") or {}
             bout_rows.append({
@@ -457,7 +462,7 @@ with col_h1:
         st.caption(
             f"{athlete.get('age_category', '')} · "
             f"{athlete.get('weapon', '').capitalize()} · "
-            f"{athlete.get('club', 'Allez Fencing')}"
+            f"{athlete.get('club') or 'Allez Fencing'}"
         )
 
 # ─── No data state ───────────────────────────────────────────────
@@ -472,19 +477,22 @@ if not events:
 
 # ─── Summary KPI row ────────────────────────────────────────────
 from metrics.calculator import calc_event_pool_metrics
-event_pool = calc_event_pool_metrics(events) if not pool else pool
+# event_pool_kpi: always the event-level aggregation (has advanced_to_de_pct)
+# pool_kpi:       prefer bout-level pool when available (higher fidelity for win% / touch diff)
+event_pool_kpi = calc_event_pool_metrics(events)
+pool_kpi = pool if pool else event_pool_kpi
 
 # Placement stats
 placed_events = [e for e in events if e.get("placement") and e.get("field_size")]
 
 k1, k2, k3, k4, k5 = st.columns(5)
 k1.metric("Events Competed",     len(events))
-k2.metric("Pool Win %",          f"{event_pool.get('pool_win_pct') or '—'}%"
-          if event_pool else "—")
-k3.metric("Touch Diff / Bout",   event_pool.get("touch_diff_per_bout") or "—"
-          if event_pool else "—")
-k4.metric("Advanced to DE %",    f"{event_pool.get('advanced_to_de_pct') or '—'}%"
-          if event_pool else "—")
+k2.metric("Pool Win %",          f"{pool_kpi.get('pool_win_pct') or '—'}%"
+          if pool_kpi else "—")
+k3.metric("Touch Diff / Bout",   pool_kpi.get("touch_diff_per_bout") or "—"
+          if pool_kpi else "—")
+k4.metric("Advanced to DE %",    f"{event_pool_kpi.get('advanced_to_de_pct') or '—'}%"
+          if event_pool_kpi else "—")
 k5.metric("Best Place",
           min((e["placement"] for e in placed_events), default=None) or "—")
 
