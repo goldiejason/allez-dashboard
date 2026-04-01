@@ -16,6 +16,12 @@ on:
         default: 'false'
         type: choice
         options: ['false', 'true']
+      force_refresh:
+        description: 'Force refresh all athletes regardless of last_refreshed timestamp'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['false', 'true']
 
 jobs:
   refresh:
@@ -44,6 +50,7 @@ jobs:
           FTL_PASSWORD:              ${{ secrets.FTL_PASSWORD }}
           UK_RATINGS_USERNAME:       ${{ secrets.UK_RATINGS_USERNAME }}
           UK_RATINGS_PASSWORD:       ${{ secrets.UK_RATINGS_PASSWORD }}
+          FORCE_REFRESH:             ${{ github.event.inputs.force_refresh }}
         run: python scripts/run_weekly_refresh.py
 
       # UK Ratings collection (event history, DE bouts, annual stats) is handled

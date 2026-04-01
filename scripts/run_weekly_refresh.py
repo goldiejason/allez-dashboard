@@ -33,8 +33,14 @@ STALE_AFTER_HOURS = 12  # skip athlete if refreshed within this many hours
 # 12 hours: prevents the on-demand dashboard button from re-running the same day,
 # but allows both the Saturday and Sunday scheduled runs to execute independently.
 
+# Set FORCE_REFRESH=true in the environment to bypass the staleness check and
+# refresh every active athlete regardless of when they were last updated.
+FORCE_REFRESH = os.getenv("FORCE_REFRESH", "false").strip().lower() == "true"
+
 
 def should_skip(last_refreshed: str | None) -> bool:
+    if FORCE_REFRESH:
+        return False
     if not last_refreshed:
         return False
     try:
@@ -46,6 +52,9 @@ def should_skip(last_refreshed: str | None) -> bool:
 
 
 def main():
+    if FORCE_REFRESH:
+        logger.info("FORCE_REFRESH=true — staleness check bypassed for all athletes")
+
     # ── Step 1: FTL-first event discovery ─────────────────────────
     # Scan FTL for UK tournaments in the last 7 days and create/link any
     # events where our athletes competed.  This ensures same-weekend events
