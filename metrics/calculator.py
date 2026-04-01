@@ -335,10 +335,13 @@ def calc_event_pool_metrics(events: list[dict]) -> dict:
     if not valid:
         return {}
 
-    total_v  = sum(e["pool_v"]  for e in valid)
-    total_l  = sum(e["pool_l"]  for e in valid)
-    total_ts = sum(e["pool_ts"] for e in valid)
-    total_tr = sum(e["pool_tr"] for e in valid)
+    # Use .get() with 0-fallback: pool_v filters to non-null, but pool_l / pool_ts /
+    # pool_tr could be null in partially-ingested rows.  Direct e["key"] access
+    # raises TypeError when the value is None; `or 0` is the correct neutral element.
+    total_v  = sum((e.get("pool_v")  or 0) for e in valid)
+    total_l  = sum((e.get("pool_l")  or 0) for e in valid)
+    total_ts = sum((e.get("pool_ts") or 0) for e in valid)
+    total_tr = sum((e.get("pool_tr") or 0) for e in valid)
     total_bouts = total_v + total_l
 
     advanced = sum(1 for e in valid if e.get("advanced_to_de"))

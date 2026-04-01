@@ -18,6 +18,22 @@ st.set_page_config(
 )
 
 
+# ─── Display helpers ────────────────────────────────────────────
+def _coerce(v, fmt="{}"):
+    """
+    Safely format a value for display, returning '—' when v is None.
+
+    Unlike the `v or '—'` idiom, this correctly distinguishes None from zero:
+      _coerce(0, "{}%")  → "0%"    (zero is a valid metric, not missing data)
+      _coerce(None, "{}%") → "—"   (no data available)
+
+    Args:
+        v:   The value to format (int, float, str, or None).
+        fmt: A str.format-style template, e.g. "{}%" or "{:+.1f}".
+    """
+    return fmt.format(v) if v is not None else "—"
+
+
 # ═══════════════════════════════════════════════════════════════
 # Render functions — defined before use
 # ═══════════════════════════════════════════════════════════════
@@ -54,9 +70,11 @@ def _render_event_history(events: list[dict]):
     st.dataframe(df, hide_index=True, use_container_width=True)
 
     # ── Placement trend chart ────────────────────────────────────
+    # Exclude rows with unknown date or placement — "—" strings as Plotly x-axis
+    # labels collapse the time axis into an unintelligible categorical sequence.
     chart_rows = [
         r for r in rows
-        if r["Place"] != "—" and "/" in r["Place"]
+        if r["Date"] != "—" and r["Place"] != "—" and "/" in r["Place"]
     ]
     if len(chart_rows) >= 3:
         dates   = [r["Date"] for r in chart_rows]
@@ -106,10 +124,10 @@ def _render_pool_tab(pool: dict, pool_bouts: list, volatility: dict, resilience:
             return
         st.caption("_Aggregated from event pool totals — individual bout breakdown available after Phase 2._")
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Pool Win %",         f"{event_pool.get('pool_win_pct') or '—'}%")
-        c2.metric("Touch Diff",          event_pool.get("touch_diff") if event_pool.get("touch_diff") is not None else "—")
-        c3.metric("Touch Diff / Bout",   event_pool.get("touch_diff_per_bout") or "—")
-        c4.metric("Advanced to DE %",   f"{event_pool.get('advanced_to_de_pct') or '—'}%")
+        c1.metric("Pool Win %",        _coerce(event_pool.get("pool_win_pct"),        "{}%"))
+        c2.metric("Touch Diff",         _coerce(event_pool.get("touch_diff")))
+        c3.metric("Touch Diff / Bout",  _coerce(event_pool.get("touch_diff_per_bout")))
+        c4.metric("Advanced to DE %",  _coerce(event_pool.get("advanced_to_de_pct"),  "{}%"))
 
         # Pool win% per event bar chart
         valid = sorted(
@@ -139,8 +157,8 @@ def _render_pool_tab(pool: dict, pool_bouts: list, volatility: dict, resilience:
 
     # ── Individual bout-level data available ────────────────────
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Win %",               f"{pool.get('pool_win_pct')}%")
-    c2.metric("Touch Diff / Bout",    pool.get("touch_diff_per_bout"))
+    c1.metric("Win %",               _coerce(pool.get("pool_win_pct"),        "{}%"))
+    c2.metric("Touch Diff / Bout",   _coerce(pool.get("touch_diff_per_bout")))
     c3.metric("Big Loss Rate",        f"{pool.get('big_loss_rate')}%" if pool.get('big_loss_rate') is not None else "—",
               help="% of losses conceded by 3+ touches")
     res_pct = resilience.get("resilience_pct") if resilience else None
@@ -216,8 +234,8 @@ def _render_de_tab(de: dict, de_bouts: list):
         st.info("No DE bout data yet. DE results are collected from UK Ratings — run a refresh or wait for the weekend automation.")
         return
     c1, c2 = st.columns(2)
-    c1.metric("DE Win %",  f"{de.get('de_win_pct')}%")
-    c2.metric("DE Bouts",   de.get("total_de_bouts"))
+    c1.metric("DE Win %",  _coerce(de.get("de_win_pct"),       "{}%"))
+    c2.metric("DE Bouts",  _coerce(de.get("total_de_bouts")))
 
     if de_bouts:
         rows = [{
@@ -312,7 +330,10 @@ def _render_coaching_tab(metrics: dict):
     events = metrics.get("events", [])
 
     from metrics.calculator import calc_event_pool_metrics
-    event_pool = calc_event_pool_metrics(events) if not pool else {}
+    # Always compute event-level aggregation — provides advanced_to_de_pct regardless of
+    # whether bout-level data (pool) exists.  Previously this was set to {} when pool was
+    # truthy, silently hiding the Advanced to DE stat for every Phase 2 athlete.
+    event_pool = calc_event_pool_metrics(events)
 
     effective_pool = pool or event_pool
 
@@ -336,11 +357,16 @@ def _render_coaching_tab(metrics: dict):
         st.write(f"**Advanced to DE:** {adv}%  ({adv_n} of {total_n} events)")
 
     # ── Touch differential ───────────────────────────────────────
-    td = effective_pool.get("touch_diff")
+    td   = effective_pool.get("touch_diff")
     tdpb = effective_pool.get("touch_diff_per_bout")
     if td is not None:
-        icon = "📈" if td > 0 else "📉"
-        st.write(f"**Touch Differential:** {'+' if td >= 0 else ''}{td} total  ({'+' if (tdpb or 0) >= 0 else ''}{tdpb} per bout)  {icon}")
+        icon     = "📈" if td > 0 else ("📉" if td < 0 else "➡️")
+        td_sign  = "+" if td > 0 else ""
+        tdpb_str = _coerce(tdpb)
+        st.write(
+            f"**Touch Differential:** {td_sign}{td} total  "
+            f"({tdpb_str} per bout)  {icon}"
+        )
 
     # ── Trend (only if individual bout data available) ───────────
     if trend:
@@ -487,12 +513,9 @@ placed_events = [e for e in events if e.get("placement") and e.get("field_size")
 
 k1, k2, k3, k4, k5 = st.columns(5)
 k1.metric("Events Competed",     len(events))
-k2.metric("Pool Win %",          f"{pool_kpi.get('pool_win_pct') or '—'}%"
-          if pool_kpi else "—")
-k3.metric("Touch Diff / Bout",   pool_kpi.get("touch_diff_per_bout") or "—"
-          if pool_kpi else "—")
-k4.metric("Advanced to DE %",    f"{event_pool_kpi.get('advanced_to_de_pct') or '—'}%"
-          if event_pool_kpi else "—")
+k2.metric("Pool Win %",         _coerce(pool_kpi.get("pool_win_pct"),              "{}%") if pool_kpi       else "—")
+k3.metric("Touch Diff / Bout",  _coerce(pool_kpi.get("touch_diff_per_bout"))          if pool_kpi       else "—")
+k4.metric("Advanced to DE %",   _coerce(event_pool_kpi.get("advanced_to_de_pct"),    "{}%") if event_pool_kpi else "—")
 k5.metric("Best Place",
           min((e["placement"] for e in placed_events), default=None) or "—")
 
