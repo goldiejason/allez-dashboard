@@ -470,7 +470,7 @@ def main():
 
         # ── Step 2: Load unmatched DB events ─────────────────────
         evq = db.table("events")\
-            .select("id, event_name, ftl_event_id")\
+            .select("id, event_name, ftl_event_id, date")\
             .eq("tournament_id", t["id"])\
             .is_("ftl_event_id", "null")
         db_events = evq.execute().data or []
@@ -597,9 +597,28 @@ def main():
                 if m["ftl_event_id"] and m["match_quality"] in apply_qualities
             }
             applied = 0
+            year_skipped = 0
             for ev in db_events:
                 ftl_eid = name_to_ftl.get(ev.get("event_name") or "")
                 if ftl_eid:
+                    # Year guard: skip event rows whose date year differs from
+                    # the FTL tournament year by more than 1.  This prevents
+                    # historic events misfiled under a newer tournament from
+                    # receiving a wrong-year FTL event ID.
+                    ev_year  = (ev.get("date") or "")[:4]
+                    ftl_year = t_date[:4]  # t_date = t["date_start"][:10]
+                    if ev_year and ftl_year:
+                        try:
+                            if abs(int(ev_year) - int(ftl_year)) > 1:
+                                logger.warning(
+                                    f"   SKIP year mismatch: "
+                                    f"'{ev.get('event_name')}' "
+                                    f"evt={ev_year} vs tourney={ftl_year}"
+                                )
+                                year_skipped += 1
+                                continue
+                        except ValueError:
+                            pass  # unparseable year — proceed with write
                     db.table("events").update(
                         {"ftl_event_id": ftl_eid}
                     ).eq("id", ev["id"]).execute()
@@ -608,8 +627,9 @@ def main():
                 1 for m in matches
                 if m["match_quality"] == "weapon+gender" and not args.apply_partial
             )
+            year_note = f", {year_skipped} skipped (year mismatch)" if year_skipped else ""
             logger.info(
-                f"   Applied: {applied}/{len(db_events)} event rows"
+                f"   Applied: {applied}/{len(db_events)} event rows{year_note}"
                 + (f"  ({skipped_partial} partial skipped — re-run with --apply-partial to include)"
                    if skipped_partial else "")
             )

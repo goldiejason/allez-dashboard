@@ -607,6 +607,39 @@ def collect_athlete(athlete_id: str, name_ftl: str, force: bool = False) -> dict
                 elif not bout_result["skipped"]:
                     logger.info(f"  {event_name}: pool bouts inserted={bout_result['inserted']}")
 
+            # 5b. Aggregate-stat fallback: if the FTL pools/results/data endpoint
+            #     returned nothing (pool_stats is None) but we have bout rows for
+            #     this event — either just inserted or previously stored — compute
+            #     pool_v/l/ts/tr/ind from those bouts and write them now.
+            #     This handles events where FTL publishes bout scores but not the
+            #     aggregate summary (observed on some LPJS club-circuit events).
+            if pool_id_seed and not pool_stats:
+                stored_bouts = (
+                    db.table("pool_bouts")
+                      .select("ts, tr, result")
+                      .eq("event_id", event_db_id)
+                      .execute()
+                      .data or []
+                )
+                if stored_bouts:
+                    v  = sum(1 for b in stored_bouts if b["result"])
+                    l  = len(stored_bouts) - v
+                    ts = sum(b["ts"] for b in stored_bouts)
+                    tr = sum(b["tr"] for b in stored_bouts)
+                    agg = {
+                        "pool_v":   v,
+                        "pool_l":   l,
+                        "pool_ts":  ts,
+                        "pool_tr":  tr,
+                        "pool_ind": ts - tr,
+                    }
+                    db.table("events").update(agg).eq("id", event_db_id).execute()
+                    logger.info(
+                        f"  {event_name}: pool stats computed from bouts — "
+                        f"V{v}/L{l} TS{ts}-TR{tr} Ind{ts - tr:+d}"
+                    )
+                    summary["events_updated"] += 1
+
         except Exception as e:
             logger.error(f"Error processing event {ftl_event_id}: {e}")
             summary["errors"].append(f"{event_name}: {e}")

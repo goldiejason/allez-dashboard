@@ -478,7 +478,7 @@ def _parse_placement(text: str) -> tuple[Optional[int], Optional[int]]:
 
 def _load_tournaments(db) -> dict[str, dict]:
     """Load all tournaments from DB.  Returns {normalised_name: row_dict}."""
-    rows = db.table("tournaments").select("id, name, country").execute().data or []
+    rows = db.table("tournaments").select("id, name, country, date_start").execute().data or []
     return {_normalize_tourney_name(r["name"]): r for r in rows}
 
 
@@ -489,19 +489,49 @@ def _match_tournament(ukr_name: str, tourney_map: dict[str, dict]) -> Optional[s
     Returns tournament_id (uuid str) or None.
 
     Strategy:
-    1. Exact normalised match
-    2. Fuzzy match above threshold (picks best score)
-    3. Substring containment fallback
+    1. Exact normalised match (year-compatible only)
+    2. Fuzzy match above threshold (year-compatible candidates only)
+    3. Substring containment fallback (year-compatible only)
+
+    Year guard: if the UK Ratings tournament name contains a 4-digit year
+    (e.g. "LPJS London Foil 2026"), candidates whose date_start year differs
+    by more than 1 are excluded.  This prevents historic events from being
+    misfiled under a newer same-named tournament and vice-versa.
     """
     norm = _normalize_tourney_name(ukr_name)
 
-    # 1. Exact
-    if norm in tourney_map:
-        return tourney_map[norm]["id"]
+    # Extract year hint from the raw UKR name ("LPJS London Foil 2026" → 2026)
+    _ym = re.search(r"\b(20\d{2})\b", ukr_name)
+    ukr_year: Optional[int] = int(_ym.group(1)) if _ym else None
 
-    # 2. Fuzzy
+    def _year_ok(row: dict) -> bool:
+        """True if the candidate's date_start year is compatible with ukr_year."""
+        if ukr_year is None:
+            return True  # no year extractable from UKR name — allow any match
+        date_start = row.get("date_start") or ""
+        if not date_start:
+            return True  # DB row has no date — allow match rather than block
+        try:
+            db_year = int(str(date_start)[:4])
+            return abs(db_year - ukr_year) <= 1
+        except (ValueError, TypeError):
+            return True
+
+    # 1. Exact normalised match
+    if norm in tourney_map:
+        row = tourney_map[norm]
+        if _year_ok(row):
+            return row["id"]
+        logger.debug(
+            f"  Exact name match for '{ukr_name}' rejected — "
+            f"year mismatch (ukr={ukr_year}, db={str(row.get('date_start') or '')[:4]})"
+        )
+
+    # 2. Fuzzy match — only among year-compatible candidates
     best_score, best_id = 0.0, None
     for db_norm, row in tourney_map.items():
+        if not _year_ok(row):
+            continue
         score = _fuzzy_ratio(norm, db_norm)
         if score > best_score:
             best_score, best_id = score, row["id"]
@@ -510,8 +540,10 @@ def _match_tournament(ukr_name: str, tourney_map: dict[str, dict]) -> Optional[s
         logger.debug(f"  Fuzzy match '{ukr_name}' → score={best_score:.2f}")
         return best_id
 
-    # 3. Substring containment (handles abbreviated names)
+    # 3. Substring containment (handles abbreviated names) — year-compatible only
     for db_norm, row in tourney_map.items():
+        if not _year_ok(row):
+            continue
         if norm in db_norm or db_norm in norm:
             logger.debug(f"  Substring match '{ukr_name}' → '{row['name']}'")
             return row["id"]
