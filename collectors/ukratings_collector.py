@@ -477,8 +477,19 @@ def _parse_placement(text: str) -> tuple[Optional[int], Optional[int]]:
 # ── Tournament + event matching / creation ─────────────────────────
 
 def _load_tournaments(db) -> dict[str, dict]:
-    """Load all tournaments from DB.  Returns {normalised_name: row_dict}."""
-    rows = db.table("tournaments").select("id, name, country, date_start").execute().data or []
+    """Load all tournaments from DB.  Returns {normalised_name: row_dict}.
+
+    Supabase PostgREST defaults to a 1 000-row page limit; explicitly
+    requesting 10 000 rows ensures the full table is loaded regardless of
+    how many tournaments accumulate over time.
+    """
+    rows = (
+        db.table("tournaments")
+          .select("id, name, country, date_start")
+          .limit(10000)
+          .execute()
+          .data or []
+    )
     return {_normalize_tourney_name(r["name"]): r for r in rows}
 
 
@@ -561,6 +572,11 @@ def _create_tournament(db, ukr_name: str) -> str:
         "country":        "GBR",
         "is_international": False,
     }).execute()
+    if not res.data:
+        raise RuntimeError(
+            f"Tournament insert for '{clean_name}' returned no data — "
+            "possible RLS policy or unique-constraint violation"
+        )
     new_id = res.data[0]["id"]
     logger.info(f"  Created tournament '{clean_name}' → {new_id}")
     return new_id
@@ -594,11 +610,13 @@ def _match_or_create_event(
 
     if res.data:
         existing = res.data[0]
-        # Update placement/field_size if UK Ratings has data and DB doesn't
+        # Update placement/field_size if UK Ratings has data and DB doesn't.
+        # Use `is not None` rather than truthiness — placement=0 is invalid in
+        # practice but `if placement:` would silently discard it.
         updates = {}
-        if placement and not existing.get("placement"):
+        if placement is not None and existing.get("placement") is None:
             updates["placement"] = placement
-        if field_size and not existing.get("field_size"):
+        if field_size is not None and existing.get("field_size") is None:
             updates["field_size"] = field_size
         if updates:
             db.table("events").update(updates).eq("id", existing["id"]).execute()
@@ -616,9 +634,9 @@ def _match_or_create_event(
         event_id = res.data[0]["id"]
         # Stamp the UK Ratings ID so future runs use path 1
         upd = {"uk_ratings_tourney_id": ukr_tourney_id}
-        if placement:
+        if placement is not None:
             upd["placement"] = placement
-        if field_size:
+        if field_size is not None:
             upd["field_size"] = field_size
         db.table("events").update(upd).eq("id", event_id).execute()
         logger.debug(f"  Linked existing event {event_id} → uk_ratings_tourney_id={ukr_tourney_id}")
@@ -632,9 +650,9 @@ def _match_or_create_event(
             "event_name":          event_name,
             "uk_ratings_tourney_id": ukr_tourney_id,
         }
-        if placement:
+        if placement is not None:
             row["placement"] = placement
-        if field_size:
+        if field_size is not None:
             row["field_size"] = field_size
 
         res = db.table("events").insert(row).execute()
@@ -761,8 +779,11 @@ def collect_athlete_de_bouts(
     # We also need tournament names — fetch from the competition history
     competition_history = _parse_competition_history(soup)
 
-    # Build: tournament_name (normalised) → event_id
-    tourney_to_event: dict[str, str] = {}
+    # Build: tournament_name (normalised) → list of event_ids.
+    # Using a list rather than a plain dict prevents the last-write-wins
+    # overwrite that occurs when an athlete has multiple events at the same
+    # named tournament (e.g. U12 foil AND sabre at the same venue/weekend).
+    tourney_to_event: dict[str, list[str]] = {}
     event_id_by_ukr: dict[int, str] = {
         row["uk_ratings_tourney_id"]: row["id"]
         for row in (events_res.data or [])
@@ -772,13 +793,31 @@ def collect_athlete_de_bouts(
         event_id = event_id_by_ukr.get(comp["uk_tourney_id"])
         if event_id:
             norm = _normalize_tourney_name(comp["tournament_name"])
-            tourney_to_event[norm] = event_id
+            if norm not in tourney_to_event:
+                tourney_to_event[norm] = []
+            if event_id not in tourney_to_event[norm]:
+                tourney_to_event[norm].append(event_id)
 
     # Insert DE bouts
     for bout in de_bouts:
         try:
             norm = _normalize_tourney_name(bout["tournament_name"])
-            event_id = tourney_to_event.get(norm)
+            event_ids = tourney_to_event.get(norm, [])
+
+            if len(event_ids) == 1:
+                event_id = event_ids[0]
+            elif len(event_ids) > 1:
+                # Athlete had multiple events at this tournament; DE bouts do
+                # not carry weapon/age info so we cannot disambiguate precisely.
+                # Use the first event and emit a warning for manual review.
+                event_id = event_ids[0]
+                logger.warning(
+                    f"  Ambiguous tournament '{bout['tournament_name']}' maps to "
+                    f"{len(event_ids)} events — DE bout vs '{bout['opponent_name']}' "
+                    f"filed under first event ({event_id[:8]}…). Manual check advised."
+                )
+            else:
+                event_id = None
 
             if event_id is None:
                 logger.warning(

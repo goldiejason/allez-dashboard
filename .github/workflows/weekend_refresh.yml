@@ -65,4 +65,8 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           FTL_USERNAME:              ${{ secrets.FTL_USERNAME }}
           FTL_PASSWORD:              ${{ secrets.FTL_PASSWORD }}
-        run: python scripts/discover_ftl_events.py --apply --apply-partial
+        # --apply-partial is deliberately omitted: weapon+gender-only matches
+        # are written to the review CSV but never auto-applied in CI because
+        # an unreviewed partial match can silently link the wrong age group.
+        # Run locally with --apply-partial only after reviewing the CSV output.
+        run: python scripts/discover_ftl_events.py --apply

@@ -507,7 +507,14 @@ def collect_pool_bouts_for_event(
         if bouts is None:
             continue
         rows = [{**b, "event_id": event_db_id} for b in bouts]
-        db.table("pool_bouts").insert(rows).execute()
+        try:
+            db.table("pool_bouts").insert(rows).execute()
+        except Exception as exc:
+            logger.error(
+                f"  pool_bouts insert failed for event {event_db_id} "
+                f"(pool {pool_num}): {exc}"
+            )
+            return {"inserted": 0, "skipped": False, "error": str(exc)}
         return {"inserted": len(bouts), "skipped": False, "error": None}
 
     return {"inserted": 0, "skipped": False, "error": f"'{name_ftl}' not found in any of {len(pool_ids)} pools"}
