@@ -64,6 +64,7 @@ def main(apply: bool):
         db.table("events")
           .select("id, athlete_id, tournament_id, date, event_name, uk_ratings_tourney_id")
           .not_.is_("uk_ratings_tourney_id", "null")
+          .limit(10000)
           .execute()
           .data or []
     )
@@ -73,6 +74,7 @@ def main(apply: bool):
     tourneys_raw = (
         db.table("tournaments")
           .select("id, name, date_start")
+          .limit(10000)
           .execute()
           .data or []
     )

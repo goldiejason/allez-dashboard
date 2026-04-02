@@ -746,12 +746,16 @@ def discover_recent_ftl_events(days_back: int = 7, dry_run: bool = False) -> dic
     summary["tournaments_scanned"] = len(tournaments)
 
     # ── Cache existing DB tournaments keyed by ftl_tournament_id ──
+    # Supabase PostgREST defaults to a 1 000-row page limit; explicitly
+    # requesting 10 000 rows ensures the full table is loaded regardless of
+    # how many tournaments accumulate over time.
     existing_t: dict[str, str] = {
         row["ftl_tournament_id"]: row["id"]
         for row in (
             db.table("tournaments")
               .select("id, ftl_tournament_id")
               .not_.is_("ftl_tournament_id", "null")
+              .limit(10000)
               .execute().data or []
         )
     }
@@ -827,6 +831,11 @@ def discover_recent_ftl_events(days_back: int = 7, dry_run: bool = False) -> dic
                         "date_start":        t_start or None,
                         "country":           "GBR",
                     }).execute()
+                    if not res.data:
+                        raise RuntimeError(
+                            f"Tournament insert for '{t_name}' returned no data — "
+                            "possible RLS policy or unique-constraint violation"
+                        )
                     db_tid = res.data[0]["id"]
                     existing_t[ftl_tid] = db_tid
                     logger.info(f"    Created tournament '{t_name}' → {db_tid[:8]}…")

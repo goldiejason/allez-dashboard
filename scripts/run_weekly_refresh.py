@@ -77,7 +77,7 @@ def main():
 
     athletes = db_read.table("athletes").select(
         "id, name_display, ftl_fencer_id, name_ftl, uk_ratings_id, weapon, last_refreshed, active"
-    ).eq("active", True).execute().data
+    ).eq("active", True).limit(10000).execute().data
 
     logger.info(f"Starting weekly refresh for {len(athletes)} active athletes")
     skipped, refreshed, errored = 0, 0, 0

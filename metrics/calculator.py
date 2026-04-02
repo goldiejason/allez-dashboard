@@ -30,6 +30,7 @@ def fetch_events(athlete_id: str) -> list[dict]:
         .select("*, tournaments(name, country, is_international)")
         .eq("athlete_id", athlete_id)
         .order("date", desc=True, nullslast=True)
+        .limit(10000)
         .execute()
     )
     return res.data or []
@@ -42,6 +43,7 @@ def fetch_pool_bouts(athlete_id: str) -> list[dict]:
         db.table("pool_bouts")
         .select("*, events!inner(athlete_id, date, event_name)")
         .eq("events.athlete_id", athlete_id)
+        .limit(10000)
         .execute()
     )
     # Sort in Python — PostgREST can't order by embedded resource columns
@@ -56,6 +58,7 @@ def fetch_de_bouts(athlete_id: str) -> list[dict]:
         db.table("de_bouts")
         .select("*, events!inner(athlete_id, date, event_name)")
         .eq("events.athlete_id", athlete_id)
+        .limit(10000)
         .execute()
     )
     data = res.data or []
@@ -69,6 +72,7 @@ def fetch_annual_stats(athlete_id: str) -> list[dict]:
         .select("*")
         .eq("athlete_id", athlete_id)
         .order("year", desc=True)
+        .limit(10000)
         .execute()
     )
     return res.data or []

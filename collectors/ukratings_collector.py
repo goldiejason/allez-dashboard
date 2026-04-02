@@ -656,6 +656,12 @@ def _match_or_create_event(
             row["field_size"] = field_size
 
         res = db.table("events").insert(row).execute()
+        if not res.data:
+            raise RuntimeError(
+                f"Event insert for '{event_name}' "
+                f"(uk_id={ukr_tourney_id}) returned no data — "
+                "possible RLS policy or unique-constraint violation"
+            )
         new_id = res.data[0]["id"]
         logger.info(f"  Created event '{event_name}' (uk_id={ukr_tourney_id}) → {new_id}")
         return new_id

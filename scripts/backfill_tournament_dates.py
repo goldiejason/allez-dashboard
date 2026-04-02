@@ -176,6 +176,7 @@ def phase1_ftl(apply: bool) -> dict[str, str]:
           .select("id, name, ftl_tournament_id")
           .is_("date_start", "null")
           .not_.is_("ftl_tournament_id", "null")
+          .limit(10000)
           .execute()
           .data or []
     )
@@ -232,6 +233,7 @@ def phase2_propagate(apply: bool, extra_dates: dict[str, str] | None = None) -> 
         db.table("events")
           .select("id, tournament_id")
           .is_("date", "null")
+          .limit(10000)
           .execute()
           .data or []
     )
@@ -246,6 +248,7 @@ def phase2_propagate(apply: bool, extra_dates: dict[str, str] | None = None) -> 
         db.table("tournaments")
           .select("id, date_start")
           .not_.is_("date_start", "null")
+          .limit(10000)
           .execute()
           .data or []
     )

@@ -49,8 +49,8 @@ def _render_event_history(events: list[dict]):
         t = ev.get("tournaments") or {}
         flag = "🌍" if t.get("is_international") else "🇬🇧"
         pool_pct = None
-        if ev.get("pool_v") is not None and (ev.get("pool_v", 0) + ev.get("pool_l", 0)) > 0:
-            bouts = ev["pool_v"] + ev["pool_l"]
+        if ev.get("pool_v") is not None and (ev.get("pool_v", 0) + (ev.get("pool_l") or 0)) > 0:
+            bouts = (ev.get("pool_v") or 0) + (ev.get("pool_l") or 0)
             pool_pct = f"{ev['pool_v']}/{bouts}  ({round(ev['pool_v']/bouts*100)}%)"
         place = ev.get("placement")
         field = ev.get("field_size")
@@ -62,7 +62,7 @@ def _render_event_history(events: list[dict]):
             "Ctry":        flag,
             "Place":       place_str,
             "Pool V/L":    pool_pct or "—",
-            "TS–TR":       f"{ev['pool_ts']}–{ev['pool_tr']}" if ev.get("pool_ts") is not None else "—",
+            "TS–TR":       f"{ev['pool_ts']}–{ev['pool_tr']}" if (ev.get("pool_ts") is not None and ev.get("pool_tr") is not None) else "—",
             "Ind":         ev.get("pool_ind"),
             "→DE":         "✅" if ev.get("advanced_to_de") else ("❌" if ev.get("pool_v") is not None else "—"),
         })
@@ -136,7 +136,7 @@ def _render_pool_tab(pool: dict, pool_bouts: list, volatility: dict, resilience:
         )
         if valid:
             labels  = [e.get("tournaments", {}).get("name", "")[:20] if e.get("tournaments") else e.get("event_name","")[:20] for e in valid]
-            bouts   = [e["pool_v"] + e["pool_l"] for e in valid]
+            bouts   = [(e.get("pool_v") or 0) + (e.get("pool_l") or 0) for e in valid]
             win_pct = [round(e["pool_v"] / b * 100, 1) if b else 0 for e, b in zip(valid, bouts)]
             fig = go.Figure(go.Bar(
                 x=list(range(len(labels))), y=win_pct,
@@ -411,7 +411,7 @@ def _render_coaching_tab(metrics: dict):
         c2.metric("Career Avg %ile",     f"{avg_pct}%", help="Lower = better")
         c3.metric("Recent 5 Avg %ile",   f"{recent_pct}%",
                   delta=f"{round(avg_pct - recent_pct, 1)}pp vs career",
-                  delta_color="normal")
+                  delta_color="inverse")
         st.caption("Percentile = place ÷ field × 100. Lower is better (1% = top of field).")
 
     st.caption("All insights derived from real data — no proxy values.")
@@ -427,7 +427,7 @@ def load_athlete_list():
     db = get_read_client()
     return db.table("athletes").select(
         "id, name_display, weapon, age_category, last_refreshed, name_ftl"
-    ).eq("active", True).order("name_display").execute().data or []
+    ).eq("active", True).order("name_display").limit(10000).execute().data or []
 
 
 athletes = load_athlete_list()

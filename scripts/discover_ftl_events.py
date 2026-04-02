@@ -45,6 +45,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 load_dotenv()
 
 from database.client import get_write_client
+from collectors.ftl_collector import _get_client as _ftl_client
 
 logging.basicConfig(
     level=logging.INFO,
@@ -154,8 +155,13 @@ def _age(text: str) -> Optional[str]:
     )
     if m:
         n = int(m.group(1))
-        # Round odd ages up to the nearest even FTL bracket
-        if n % 2 == 1:
+        # Round odd ages up to the nearest even FTL bracket.
+        # Exception: 23 is a legitimate FTL age category (U23 = under 23) —
+        # it must NOT be rounded to u24, which does not exist on FTL.
+        # The odd→even rounding applies only to the UK Ratings sub-brackets
+        # U11/U13/U15/U17/U19 which sit inside the corresponding even FTL
+        # events (U12/U14/U16/U18/U20).
+        if n % 2 == 1 and n != 23:
             n += 1
         return f"u{n}"
     return None
@@ -199,10 +205,13 @@ def jaccard(a: str, b: str) -> float:
 # ═══════════════════════════════════════════════════════════════
 
 def _get(url: str, params: dict = None) -> Optional[httpx.Response]:
+    # Use the authenticated FTL client so requests succeed after the
+    # FTL auth wall goes live (2026-04-14).  The client handles the
+    # login/CSRF flow once and reuses the session for all subsequent calls.
     try:
         time.sleep(REQUEST_DELAY)
-        r = httpx.get(
-            url, headers=HEADERS, params=params,
+        r = _ftl_client().get(
+            url, params=params,
             timeout=REQUEST_TIMEOUT, follow_redirects=True
         )
         r.raise_for_status()
@@ -425,7 +434,7 @@ def main():
         q = q.is_("ftl_tournament_id", "null")
     if args.name:
         q = q.ilike("name", f"%{args.name}%")
-    result = q.order("date_start", desc=True).execute()
+    result = q.order("date_start", desc=True).limit(10000).execute()
     tournaments = result.data or []
 
     if args.limit:
