@@ -51,11 +51,15 @@ def fetch_events(athlete_id: str) -> list[dict]:
         db.table("events")
         .select("*, tournaments(name, country, is_international)")
         .eq("athlete_id", athlete_id)
-        .order("date", desc=True, nullslast=True)
+        .order("date", desc=True)
         .limit(10000)
         .execute()
     )
-    return res.data or []
+    # Sort in Python so NULL dates always fall to the end regardless of
+    # which postgrest-py version Streamlit Cloud has installed.
+    # "" < any ISO date string, so reverse=True puts real dates first.
+    data = res.data or []
+    return sorted(data, key=lambda r: r.get("date") or "", reverse=True)
 
 
 def fetch_pool_bouts(athlete_id: str) -> list[dict]:
