@@ -161,14 +161,29 @@ def _render_pool_tab(pool: dict, pool_bouts: list, volatility: dict, resilience:
         return
 
     # ── Individual bout-level data available ────────────────────
+    pool_n    = pool.get("n", 0)
+    pool_tier = pool.get("confidence_tier", "")
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Win %",               _coerce(pool.get("pool_win_pct"),        "{}%"))
-    c2.metric("Touch Diff / Bout",   _coerce(pool.get("touch_diff_per_bout")))
+    c1.metric("Win %",               _coerce(pool.get("pool_win_pct"),        "{}%"),
+              help=f"Based on {pool_n} recorded pool bouts ({pool_tier.lower()} confidence)")
+    c2.metric("Touch Diff / Bout",   _coerce(pool.get("touch_diff_per_bout")),
+              help=f"Average (TS − TR) per bout · {pool_n} bouts")
     c3.metric("Big Loss Rate",        f"{pool.get('big_loss_rate')}%" if pool.get('big_loss_rate') is not None else "—",
-              help="% of losses conceded by 3+ touches")
-    res_pct = resilience.get("resilience_pct") if resilience else None
+              help="% of losses conceded by 3+ touches. Calculated from recorded bout-level data only.")
+    res_pct  = resilience.get("resilience_pct") if resilience else None
+    res_n    = resilience.get("n", 0) if resilience else 0
+    res_tier = resilience.get("confidence_tier", "") if resilience else ""
     c4.metric("Resilience Score",     f"{res_pct}%" if res_pct is not None else "—",
-              help="Win rate in the bout immediately following a loss (same event). >60% = strong bounce-back.")
+              help=f"Win rate immediately following a loss · {res_n} qualifying bouts ({res_tier.lower()} confidence). >60% = strong bounce-back.")
+
+    # Sample-size caveat — displayed prominently when data is sparse
+    if pool_tier in ("INSUFFICIENT", "LOW"):
+        st.warning(
+            f"⚠️  **Low sample size** — only {pool_n} pool bouts recorded "
+            f"({pool_tier.lower()} confidence). "
+            "Metrics above should be treated as indicative only. "
+            "Run a full data refresh to improve coverage."
+        )
 
     if volatility:
         recent_sd = volatility.get("recent_sd")
@@ -243,14 +258,25 @@ def _render_de_tab(de: dict, de_bouts: list):
     c2.metric("DE Bouts",  _coerce(de.get("total_de_bouts")))
 
     if de_bouts:
-        rows = [{
-            "Round":    b.get("round"),
-            "Opponent": b.get("opponent_name"),
-            "TS":       b.get("ts"),
-            "TR":       b.get("tr"),
-            "Result":   "✅ W" if b.get("result") else "❌ L",
-        } for b in de_bouts]
+        # DE bouts are stored winner-centric: ts = winner's score, tr = loser's score.
+        # For a loss bout, swap so the display always reads from the athlete's perspective:
+        # "My Score" = touches scored by this athlete, "Opp Score" = touches conceded.
+        rows = []
+        for b in de_bouts:
+            won   = b.get("result", False)
+            ts    = b.get("ts")
+            tr    = b.get("tr")
+            my_score  = ts if won else tr
+            opp_score = tr if won else ts
+            rows.append({
+                "Round":       b.get("round"),
+                "Opponent":    b.get("opponent_name"),
+                "Result":      "✅ W" if won else "❌ L",
+                "My Score":    my_score,
+                "Opp Score":   opp_score,
+            })
         st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+        st.caption("Scores shown from this athlete's perspective: My Score = touches scored, Opp Score = touches conceded.")
 
 
 def _render_rivals_tab(rivals: list):
@@ -523,7 +549,8 @@ def _render_coaching_tab(metrics: dict):
 def load_athlete_list():
     db = get_read_client()
     return db.table("athletes").select(
-        "id, name_display, weapon, age_category, last_refreshed, name_ftl"
+        "id, name_display, weapon, age_category, last_refreshed, name_ftl, "
+        "ftl_fencer_id, uk_ratings_id"
     ).eq("active", True).order("name_display").limit(10000).execute().data or []
 
 
@@ -592,10 +619,27 @@ with col_h1:
 has_event_pool_data = any(e.get("pool_v") is not None for e in events)
 
 if not events:
-    st.info(
-        "No events collected yet for this athlete. "
-        "Click **Refresh Data Now** in the sidebar to pull their history."
-    )
+    # Distinguish between "not yet collected" and "not configured at all"
+    # so the message directs the right person to take the right action.
+    has_source_ids = any([
+        selected.get("name_ftl"),
+        selected.get("ftl_fencer_id"),
+        selected.get("uk_ratings_id"),
+    ])
+    if has_source_ids:
+        st.info(
+            "No events collected yet for this athlete. "
+            "Click **Refresh Data Now** in the sidebar to pull their history "
+            "from FencingTimeLive and UK Ratings."
+        )
+    else:
+        st.warning(
+            "This athlete has not yet been configured for data collection. "
+            "They have no FTL name, FTL fencer ID, or UK Ratings ID set. "
+            "Clicking Refresh will not fetch any data until these are populated. "
+            "Contact your administrator to set up their competition data profile "
+            "in the Supabase athletes table."
+        )
     st.stop()
 
 # ─── Summary KPI row ────────────────────────────────────────────
