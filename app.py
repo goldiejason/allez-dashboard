@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from database.client import get_read_client
 from metrics.calculator import calc_all_metrics
 from collectors.ftl_collector import collect_athlete
+from intelligence.engine import CoachingEngine
 
 st.set_page_config(
     page_title="Allez Fencing Dashboard",
@@ -62,8 +63,12 @@ def _render_event_history(events: list[dict]):
             "Ctry":        flag,
             "Place":       place_str,
             "Pool V/L":    pool_pct or "—",
-            "TS–TR":       f"{ev['pool_ts']}–{ev['pool_tr']}" if (ev.get("pool_ts") is not None and ev.get("pool_tr") is not None) else "—",
-            "Ind":         ev.get("pool_ind"),
+            "TS–TR":       (
+                f"{ev['pool_ts']}–{ev['pool_tr']}"
+                if (ev.get("pool_ts") is not None and ev.get("pool_tr") is not None)
+                else "—"
+            ),
+            "Ind":         _coerce(ev.get("pool_ind"), "{:+d}"),
             "→DE":         "✅" if ev.get("advanced_to_de") else ("❌" if ev.get("pool_v") is not None else "—"),
         })
     df = pd.DataFrame(rows)
@@ -258,8 +263,8 @@ def _render_rivals_tab(rivals: list):
     c1, c2, c3 = st.columns(3)
     c1.metric("Repeat Opponents",    len(rivals))
     c2.metric("Winning Record vs",   f"{above_50} of {len(rivals)}")
-    c3.metric("Most Faced",          rivals[0]["name"].split()[-1] if rivals else "—",
-              help=f"{rivals[0]['total']} bouts" if rivals else "")
+    c3.metric("Most Faced",          rivals[0]["name"].split()[0] if rivals else "—",
+              help=f"{rivals[0]['name']} — {rivals[0]['total']} bouts" if rivals else "")
 
     # ── Win % bar chart ──────────────────────────────────────────
     # Show top 15 by encounter count to keep chart readable
@@ -314,107 +319,199 @@ def _render_monthly_tab(month_stats: dict):
     sorted_months = sorted(month_stats.items(), key=lambda x: int(x[0]))
     labels   = [month_names.get(m, m) for m, _ in sorted_months]
     win_pcts = [d.get("win_pct") for _, d in sorted_months]
-    fig = go.Figure(go.Bar(x=labels, y=win_pcts, marker_color="#1f77b4"))
+    bouts_n  = [d.get("total_bouts", 0) for _, d in sorted_months]
+    fig = go.Figure(go.Bar(
+        x=labels, y=win_pcts,
+        marker_color="#1f77b4",
+        text=[f"{w}%" for w in win_pcts],
+        textposition="outside",
+        hovertext=[f"{l}: {w}% win rate ({n} bouts)" for l, w, n in zip(labels, win_pcts, bouts_n)],
+        hoverinfo="text",
+    ))
     fig.update_layout(
         title="Pool Win % by Month", yaxis_title="Win %",
-        yaxis_range=[0, 100], height=350
+        yaxis_range=[0, 110], height=350
     )
     st.plotly_chart(fig, use_container_width=True)
+    # Caveat: months with few bouts are unreliable — flag them
+    sparse_months = [labels[i] for i, n in enumerate(bouts_n) if n < 10]
+    if sparse_months:
+        st.caption(
+            f"⚠️ Low sample months (fewer than 10 bouts): {', '.join(sparse_months)}. "
+            "Win rates in these months should be treated as indicative rather than conclusive."
+        )
 
 
 def _render_coaching_tab(metrics: dict):
-    pool   = metrics.get("pool", {})
-    de     = metrics.get("de", {})
-    trend  = metrics.get("trend", {})
-    nvr    = metrics.get("nvr", {})
-    events = metrics.get("events", [])
+    """
+    Coaching Intelligence tab — powered by CoachingEngine.
 
+    Renders a full analytical report: coverage quality, rule-based insights
+    sorted by priority, placement progression, and data-driven priorities.
+    """
     from metrics.calculator import calc_event_pool_metrics
-    # Always compute event-level aggregation — provides advanced_to_de_pct regardless of
-    # whether bout-level data (pool) exists.  Previously this was set to {} when pool was
-    # truthy, silently hiding the Advanced to DE stat for every Phase 2 athlete.
-    event_pool = calc_event_pool_metrics(events)
 
+    events     = metrics.get("events", []) or []
+    athlete    = metrics.get("athlete") or {}
+    name       = athlete.get("name_display", "This athlete")
+    event_pool = calc_event_pool_metrics(events)
+    pool       = metrics.get("pool", {}) or {}
     effective_pool = pool or event_pool
 
-    if not effective_pool:
-        st.info("Coaching intelligence requires bout-level data.")
+    # ── Empty state ──────────────────────────────────────────────
+    if not events:
+        st.info(
+            "No competition history recorded for this athlete yet. "
+            "Click **Refresh Data Now** in the sidebar to pull their history from "
+            "FencingTimeLive and UK Ratings."
+        )
         return
 
-    st.subheader("Performance Summary")
-
-    # ── Pool headline ─────────────────────────────────────────────
-    win_pct = effective_pool.get("pool_win_pct")
-    if win_pct is not None:
-        bar = "🟩" * int(win_pct // 10) + "⬜" * (10 - int(win_pct // 10))
-        st.write(f"**Pool Win Rate:** {win_pct}%  {bar}")
-
-    # ── Advanced to DE ───────────────────────────────────────────
-    if event_pool.get("advanced_to_de_pct") is not None:
-        adv = event_pool["advanced_to_de_pct"]
-        adv_n = event_pool.get("advanced_to_de_count", "?")
-        total_n = event_pool.get("events_with_pool", "?")
-        st.write(f"**Advanced to DE:** {adv}%  ({adv_n} of {total_n} events)")
-
-    # ── Touch differential ───────────────────────────────────────
-    td   = effective_pool.get("touch_diff")
-    tdpb = effective_pool.get("touch_diff_per_bout")
-    if td is not None:
-        icon     = "📈" if td > 0 else ("📉" if td < 0 else "➡️")
-        td_sign  = "+" if td > 0 else ""
-        tdpb_str = _coerce(tdpb)
-        st.write(
-            f"**Touch Differential:** {td_sign}{td} total  "
-            f"({tdpb_str} per bout)  {icon}"
+    if not effective_pool and not metrics.get("de", {}):
+        st.info(
+            "Coaching intelligence requires at least one event with pool or DE data. "
+            "Run a full refresh to collect bout-level results."
         )
+        return
 
-    # ── Trend (only if individual bout data available) ───────────
-    if trend:
-        direction = trend.get("direction", "stable")
-        delta     = trend.get("delta", 0)
-        icon2 = "📈" if direction == "up" else ("📉" if direction == "down" else "➡️")
-        st.write(
-            f"{icon2} **Trend:** Pool win rate is **{direction}** "
-            f"({'+' if delta >= 0 else ''}{delta}pp vs prior events)"
-        )
+    # ── Generate coaching report ──────────────────────────────────
+    engine = CoachingEngine()
+    report = engine.generate(metrics, athlete_name=name)
 
-    # ── New vs Repeat ────────────────────────────────────────────
-    if nvr and nvr.get("gap") is not None:
-        gap = nvr["gap"]
-        fp  = nvr.get("first_pct")
-        rp  = nvr.get("repeat_pct")
-        st.write(
-            f"**New vs Repeat Opponents:** {fp}% vs new, "
-            f"{rp}% vs repeat  ({abs(gap)}pp {'advantage' if gap > 0 else 'disadvantage'} "
-            f"vs first-time opponents)"
-        )
+    # ── Coverage quality banner ───────────────────────────────────
+    coverage = metrics.get("coverage", {}) or {}
+    tier     = coverage.get("coverage_tier", "")
+    if tier in ("LOW", "INSUFFICIENT"):
+        st.warning(report.coverage_note)
+    elif tier == "PARTIAL":
+        st.info(report.coverage_note)
+    else:
+        st.success(report.coverage_note)
 
-    # ── Big loss rate ────────────────────────────────────────────
-    if pool.get("big_loss_rate") is not None:
-        blr = pool["big_loss_rate"]
-        severity = "High" if blr > 40 else ("Moderate" if blr > 20 else "Low")
-        st.write(f"**Big Loss Rate:** {blr}% of losses by 3+ touches ({severity})")
+    # ── Summary narrative ─────────────────────────────────────────
+    if report.summary:
+        st.subheader("Coaching Summary")
+        st.write(report.summary)
 
-    # ── Placement progression ─────────────────────────────────────
+    # ── Top priorities ────────────────────────────────────────────
+    if report.priorities:
+        st.subheader("Top Priorities")
+        for i, p in enumerate(report.priorities, 1):
+            st.write(f"**{i}.** {p}")
+
+    st.divider()
+
+    # ── Full insight breakdown ────────────────────────────────────
+    st.subheader("Detailed Analysis")
+
+    severity_icons = {"STRENGTH": "✅", "CONCERN": "⚠️", "INFO": "ℹ️"}
+    category_labels = {
+        "pool": "Pool Phase",
+        "de": "Direct Elimination",
+        "mental": "Mental & Tactical",
+        "trend": "Form & Trend",
+        "benchmark": "Peer Benchmark",
+        "coverage": "Data Quality",
+    }
+
+    # Group insights by category
+    from collections import defaultdict
+    by_cat: dict = defaultdict(list)
+    for ins in report.insights:
+        by_cat[ins.category].append(ins)
+
+    cat_order = ["pool", "de", "mental", "trend", "benchmark", "coverage"]
+    for cat in cat_order:
+        if cat not in by_cat:
+            continue
+        cat_label = category_labels.get(cat, cat.title())
+        st.markdown(f"##### {cat_label}")
+        for ins in by_cat[cat]:
+            icon = severity_icons.get(ins.severity, "•")
+            with st.expander(f"{icon} {ins.headline}"):
+                st.write(ins.detail)
+                st.caption(f"_Confidence basis: {ins.data_ref}_")
+        st.write("")
+
+    # ── Placement Progression ─────────────────────────────────────
     st.divider()
     st.subheader("Placement Progression")
     valid_events = sorted(
         [e for e in events if e.get("placement") and e.get("field_size")],
         key=lambda e: e.get("date") or ""
     )
-    if valid_events:
-        pcts = [round(e["placement"] / e["field_size"] * 100, 1) for e in valid_events]
-        avg_pct = round(sum(pcts) / len(pcts), 1)
-        recent_pct = round(sum(pcts[-5:]) / min(5, len(pcts)), 1)
+    if len(valid_events) >= 3:
+        pcts       = [round(e["placement"] / e["field_size"] * 100, 1) for e in valid_events]
+        avg_pct    = round(sum(pcts) / len(pcts), 1)
+        recent_n   = min(5, len(pcts))
+        recent_pct = round(sum(pcts[-recent_n:]) / recent_n, 1)
+        # delta = career_avg minus recent: negative = improvement (lower %ile = better)
+        delta_val  = round(avg_pct - recent_pct, 1)
         c1, c2, c3 = st.columns(3)
-        c1.metric("Best Placement %ile", f"{min(pcts)}%")
-        c2.metric("Career Avg %ile",     f"{avg_pct}%", help="Lower = better")
-        c3.metric("Recent 5 Avg %ile",   f"{recent_pct}%",
-                  delta=f"{round(avg_pct - recent_pct, 1)}pp vs career",
-                  delta_color="inverse")
-        st.caption("Percentile = place ÷ field × 100. Lower is better (1% = top of field).")
+        c1.metric("Best Placement %ile", f"{min(pcts)}%",  help="Lower is better (1% = top of field)")
+        c2.metric("Career Avg %ile",     f"{avg_pct}%",    help="Lower is better")
+        c3.metric(
+            f"Recent {recent_n} Avg %ile",
+            f"{recent_pct}%",
+            delta=f"{delta_val:+.1f}pp vs career",
+            delta_color="inverse",   # lower %ile = better performance = green delta
+        )
+        st.caption(
+            "Percentile = place ÷ field × 100. Lower is better (1% = top of field, 100% = last place). "
+            "A negative delta means recent results are stronger than career average."
+        )
+    elif valid_events:
+        st.caption(f"Only {len(valid_events)} events with placement data — need at least 3 for progression chart.")
+    else:
+        st.info("No placement data available yet.")
 
-    st.caption("All insights derived from real data — no proxy values.")
+    # ── Advanced to DE detail ─────────────────────────────────────
+    st.divider()
+    st.subheader("Pool Phase Detail")
+    if event_pool:
+        adv     = event_pool.get("advanced_to_de_pct")
+        adv_n   = event_pool.get("advanced_to_de_count", 0)
+        # CI-1 fix: denominator = events_with_pool (events where pool data exists),
+        # not total events — using total events would understate the advance rate for
+        # Phase 1 athletes who have pool V/L flags recorded on the event row.
+        total_n = event_pool.get("events_with_pool", 0)
+        if adv is not None and total_n and total_n > 0:
+            st.metric(
+                "Advanced to DE",
+                f"{adv}%",
+                help=f"{adv_n} of {total_n} events with pool data — Phase 1 event flags only; "
+                     "may undercount if pool data not fully collected.",
+            )
+            st.caption(
+                "Denominator = events where pool V/L is recorded. "
+                "Events without pool data are excluded from this calculation."
+            )
+
+    win_pct = effective_pool.get("pool_win_pct")
+    if win_pct is not None:
+        bar = "🟩" * int(win_pct // 10) + "⬜" * (10 - int(win_pct // 10))
+        st.write(f"**Pool Win Rate:** {win_pct}%  {bar}")
+
+    blr = pool.get("big_loss_rate")
+    if blr is not None:
+        # CI-2 fix: add explicit caveat about big loss rate calculation basis
+        severity = "High" if blr > 40 else ("Moderate" if blr > 20 else "Low")
+        st.write(f"**Big Loss Rate:** {blr}% ({severity})")
+        st.caption(
+            "Big Loss Rate = proportion of pool bout defeats where the margin was 3+ touches. "
+            "Calculated from individual bout records (Phase 2 data only). "
+            "A high rate erodes indicator score and adversely affects seeding."
+        )
+
+    # ── Footer disclaimer ─────────────────────────────────────────
+    st.divider()
+    st.caption(
+        "**Data disclaimer:** All insights are derived exclusively from recorded competition data "
+        "in the Allez Fencing database. No proxy values, assumptions, or invented figures are used. "
+        "Insights marked INSUFFICIENT or LOW confidence reflect small sample sizes and should be "
+        "treated as directional rather than definitive. For coaching decisions, always "
+        "contextualise with direct athlete observation."
+    )
 
 
 # ═══════════════════════════════════════════════════════════════

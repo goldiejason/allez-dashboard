@@ -38,6 +38,7 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
 from database.client import get_write_client
+from core.identity import IdentityResolver
 
 load_dotenv()
 
@@ -236,15 +237,55 @@ def _get_html(url: str) -> Optional[BeautifulSoup]:
 
 
 # ── Name matching ──────────────────────────────────────────────
+# Module-level IdentityResolver — instantiated once per process.
+# The DB client is injected lazily on first call that needs alias persistence.
+_resolver: Optional[IdentityResolver] = None
+
+
+def _get_resolver() -> IdentityResolver:
+    """Return (or lazily create) the module-level IdentityResolver."""
+    global _resolver
+    if _resolver is None:
+        try:
+            db = get_write_client()
+        except Exception:
+            db = None
+        _resolver = IdentityResolver(db)
+    return _resolver
+
 
 def _name_matches(ftl_name: str, athlete_ftl_name: str) -> bool:
     """
-    Word-set matching: all words in athlete's stored name must appear in the FTL row name.
-    Handles formats like 'PANGA Daniel', 'PANGA Daniel J', 'Daniel PANGA'.
+    Backward-compatible shim that delegates to IdentityResolver.
+
+    Uses Strategy 1 (exact word-set) — the same logic as before — so existing
+    call sites that pass a bare True/False check are unaffected.  The resolver
+    is used where richer matching (fuzzy, alias cache) is needed.
     """
-    row_words    = set(ftl_name.upper().split())
-    target_words = set(athlete_ftl_name.upper().split())
-    return target_words.issubset(row_words)
+    from core.identity import match_word_set
+    return match_word_set(athlete_ftl_name, ftl_name)
+
+
+def _resolve_name(
+    ftl_name: str,
+    athlete_ftl_name: str,
+    source: str = "ftl",
+    context: str = "",
+) -> bool:
+    """
+    Full resolver-backed name match used in placement and pool lookups.
+
+    Returns True if any strategy (alias, word-set, surname, fuzzy) confirms
+    the FTL name corresponds to athlete_ftl_name.
+    """
+    resolver = _get_resolver()
+    result   = resolver.find_in_list(
+        target     = athlete_ftl_name,
+        candidates = [ftl_name],
+        source     = source,
+        context    = context,
+    )
+    return result is not None
 
 
 # ── Pool ID discovery ──────────────────────────────────────────
@@ -295,13 +336,22 @@ def get_fencer_placement(ftl_event_id: str, name_ftl: str) -> tuple[Optional[int
     """
     results = fetch_event_results(ftl_event_id)
     field_size = len(results)
-    for entry in results:
-        if entry.get("name") and _name_matches(entry["name"], name_ftl):
-            try:
-                placement = int(entry.get("place", 0))
-            except (ValueError, TypeError):
-                placement = None
-            return placement, field_size
+    # Use full resolver for placement lookup — handles fuzzy/alias variants
+    resolver   = _get_resolver()
+    names      = [e.get("name", "") for e in results]
+    match      = resolver.find_in_list(
+        target     = name_ftl,
+        candidates = names,
+        source     = "ftl",
+        context    = f"event:{ftl_event_id}",
+    )
+    if match is not None:
+        entry = results[match.index]
+        try:
+            placement = int(entry.get("place", 0))
+        except (ValueError, TypeError):
+            placement = None
+        return placement, field_size
     return None, field_size
 
 
@@ -328,20 +378,29 @@ def fetch_pool_stats(ftl_event_id: str, pool_id_seed: str, name_ftl: str) -> Opt
     if not isinstance(data, list):
         return None
 
-    for entry in data:
-        if entry.get("name") and _name_matches(entry["name"], name_ftl):
-            v = int(entry.get("v", 0))
-            m = int(entry.get("m", 0))
-            ts = int(entry.get("ts", 0))
-            tr = int(entry.get("tr", 0))
-            return {
-                "pool_v":          v,
-                "pool_l":          m - v,
-                "pool_ts":         ts,
-                "pool_tr":         tr,
-                "pool_ind":        ts - tr,
-                "advanced_to_de":  entry.get("prediction", "").lower() == "advanced",
-            }
+    # Use resolver for richer matching (fuzzy + alias cache)
+    resolver = _get_resolver()
+    names    = [e.get("name", "") for e in data]
+    match    = resolver.find_in_list(
+        target     = name_ftl,
+        candidates = names,
+        source     = "ftl",
+        context    = f"pool_stats:{ftl_event_id}",
+    )
+    if match is not None:
+        entry = data[match.index]
+        v  = int(entry.get("v",  0))
+        m  = int(entry.get("m",  0))
+        ts = int(entry.get("ts", 0))
+        tr = int(entry.get("tr", 0))
+        return {
+            "pool_v":          v,
+            "pool_l":          m - v,
+            "pool_ts":         ts,
+            "pool_tr":         tr,
+            "pool_ind":        ts - tr,
+            "advanced_to_de":  entry.get("prediction", "").lower() == "advanced",
+        }
 
     logger.warning(f"'{name_ftl}' not found in pool data for event {ftl_event_id}")
     return None
@@ -433,9 +492,17 @@ def _extract_bouts_from_pool(pool: dict, name_ftl: str) -> Optional[list[dict]]:
       result = True if the cell starts with "V"
     """
     fencers, row_cells = pool["fencers"], pool["rows"]
-    our_pos = next(
-        (pos for pos, f in fencers.items() if _name_matches(f["name"], name_ftl)), None
+    # Use resolver for richer matching in pool bout extraction
+    resolver   = _get_resolver()
+    pos_keys   = sorted(fencers.keys())
+    fencer_names = [fencers[p]["name"] for p in pos_keys]
+    match      = resolver.find_in_list(
+        target     = name_ftl,
+        candidates = fencer_names,
+        source     = "ftl_pool",
+        context    = f"pool:{pool.get('pool_number', '?')}",
     )
+    our_pos = pos_keys[match.index] if match is not None else None
     if our_pos is None:
         return None
 
@@ -805,7 +872,7 @@ def discover_recent_ftl_events(days_back: int = 7, dry_run: bool = False) -> dic
                 sur = p_name.split()[0].upper()
                 for athlete in by_surname.get(sur, []):
                     if (athlete["id"] not in seen_ids
-                            and _name_matches(p_name, athlete["name_ftl"])):
+                            and _resolve_name(p_name, athlete["name_ftl"], source="ftl", context="roster_match")):
                         matched.append(athlete)
                         seen_ids.add(athlete["id"])
 

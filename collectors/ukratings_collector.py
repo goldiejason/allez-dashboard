@@ -32,6 +32,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from database.client import get_write_client
+from core.attributor import BoutAttributor
 
 logger = logging.getLogger(__name__)
 
@@ -750,16 +751,26 @@ def collect_athlete_de_bouts(
     uk_ratings_id: int,
     weapon_code:   int,
     soup:          Optional[BeautifulSoup] = None,
+    weapon:        str = "",
 ) -> dict:
     """
     Scrape DE bouts from UK Ratings Table 10 and upsert into de_bouts.
 
-    Bouts are matched to events via the tournament name appearing in Table 1.
+    Bouts are matched to events via BoutAttributor, which uses weapon-aware
+    disambiguation (AMB-1) and staged_bouts fallback (AMB-2) rather than
+    the previous first-match heuristic.
+
     BYE rows are always skipped (no scores to record).
 
-    Returns summary: {inserted, skipped_no_event, skipped_duplicate, errors[]}
+    Returns summary: {inserted, staged, skipped_no_event, skipped_duplicate, errors[]}
     """
-    summary = {"inserted": 0, "skipped_no_event": 0, "skipped_duplicate": 0, "errors": []}
+    summary = {
+        "inserted": 0,
+        "staged": 0,
+        "skipped_no_event": 0,
+        "skipped_duplicate": 0,
+        "errors": [],
+    }
 
     if soup is None:
         soup = _fetch_athlete_page(uk_ratings_id, weapon_code)
@@ -774,73 +785,60 @@ def collect_athlete_de_bouts(
 
     db = get_write_client()
 
-    # Build tournament_name → event_id map for this athlete
-    # Use uk_ratings_tourney_id linkage where available, then fall back to tournament name
-    events_res = db.table("events")\
-        .select("id, uk_ratings_tourney_id")\
-        .eq("athlete_id", athlete_id)\
-        .not_.is_("uk_ratings_tourney_id", "null")\
+    # Derive weapon string from weapon_code if not explicitly supplied
+    if not weapon:
+        weapon = next(
+            (w for w, code in WEAPON_CODES.items() if code == weapon_code), ""
+        )
+
+    # Build event_id_by_ukr: {uk_ratings_tourney_id → event_id}
+    events_res = (
+        db.table("events")
+        .select("id, uk_ratings_tourney_id")
+        .eq("athlete_id", athlete_id)
+        .not_.is_("uk_ratings_tourney_id", "null")
+        .limit(10000)
         .execute()
-
-    # We also need tournament names — fetch from the competition history
-    competition_history = _parse_competition_history(soup)
-
-    # Build: tournament_name (normalised) → list of event_ids.
-    # Using a list rather than a plain dict prevents the last-write-wins
-    # overwrite that occurs when an athlete has multiple events at the same
-    # named tournament (e.g. U12 foil AND sabre at the same venue/weekend).
-    tourney_to_event: dict[str, list[str]] = {}
+    )
     event_id_by_ukr: dict[int, str] = {
         row["uk_ratings_tourney_id"]: row["id"]
         for row in (events_res.data or [])
     }
 
-    for comp in competition_history:
-        event_id = event_id_by_ukr.get(comp["uk_tourney_id"])
-        if event_id:
-            norm = _normalize_tourney_name(comp["tournament_name"])
-            if norm not in tourney_to_event:
-                tourney_to_event[norm] = []
-            if event_id not in tourney_to_event[norm]:
-                tourney_to_event[norm].append(event_id)
+    # Competition history carries tournament names and event_name (weapon/age label)
+    competition_history = _parse_competition_history(soup)
+
+    # Instantiate BoutAttributor — handles AMB-1 (weapon disambiguation) and
+    # AMB-2 (no event found → staged_bouts) automatically.
+    attributor = BoutAttributor(
+        db                  = db,
+        athlete_id          = athlete_id,
+        weapon              = weapon,
+        competition_history = competition_history,
+        event_id_by_ukr     = event_id_by_ukr,
+    )
 
     # Insert DE bouts
     for bout in de_bouts:
         try:
-            norm = _normalize_tourney_name(bout["tournament_name"])
-            event_ids = tourney_to_event.get(norm, [])
+            result = attributor.resolve(bout)
 
-            if len(event_ids) == 1:
-                event_id = event_ids[0]
-            elif len(event_ids) > 1:
-                # Athlete had multiple events at this tournament; DE bouts do
-                # not carry weapon/age info so we cannot disambiguate precisely.
-                # Use the first event and emit a warning for manual review.
-                event_id = event_ids[0]
-                logger.warning(
-                    f"  Ambiguous tournament '{bout['tournament_name']}' maps to "
-                    f"{len(event_ids)} events — DE bout vs '{bout['opponent_name']}' "
-                    f"filed under first event ({event_id[:8]}…). Manual check advised."
-                )
-            else:
-                event_id = None
-
-            if event_id is None:
-                logger.warning(
-                    f"No event found for DE bout: {bout['opponent_name']} "
-                    f"@ '{bout['tournament_name']}' ({bout['round_text']})"
-                )
-                summary["skipped_no_event"] += 1
+            if result is None:
+                # Bout has been staged — counted separately
+                summary["staged"] += 1
                 continue
 
-            # Attempt insert — unique constraint (event_id, round, opponent_name)
-            # prevents duplicates; ON CONFLICT DO NOTHING via upsert count check
-            existing = db.table("de_bouts")\
-                .select("id")\
-                .eq("event_id", event_id)\
-                .eq("round", bout["round_text"])\
-                .eq("opponent_name", bout["opponent_name"])\
+            event_id = result.event_id
+
+            # Attempt insert — unique constraint prevents duplicates
+            existing = (
+                db.table("de_bouts")
+                .select("id")
+                .eq("event_id", event_id)
+                .eq("round", bout["round_text"])
+                .eq("opponent_name", bout["opponent_name"])
                 .execute()
+            )
 
             if existing.data:
                 summary["skipped_duplicate"] += 1
@@ -857,8 +855,11 @@ def collect_athlete_de_bouts(
 
             summary["inserted"] += 1
             logger.debug(
-                f"  DE bout: {bout['result'] and 'W' or 'L'} "
-                f"{bout['ts']}-{bout['tr']} vs {bout['opponent_name']} ({bout['round_text']})"
+                f"  DE bout [{result.strategy}]: "
+                f"{bout['result'] and 'W' or 'L'} "
+                f"{bout['ts']}-{bout['tr']} vs {bout['opponent_name']} "
+                f"({bout['round_text']})"
+                + (" [AMBIGUOUS]" if result.ambiguous else "")
             )
 
         except Exception as e:
@@ -867,6 +868,7 @@ def collect_athlete_de_bouts(
 
     logger.info(
         f"DE bouts sync: {summary['inserted']} inserted, "
+        f"{summary['staged']} staged (pending event), "
         f"{summary['skipped_duplicate']} duplicates skipped, "
         f"{summary['skipped_no_event']} no-event skipped"
     )
