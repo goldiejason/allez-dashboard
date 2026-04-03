@@ -126,10 +126,15 @@ class CoachingEngine:
         ----------
         metrics :       Full dict returned by calc_all_metrics().
         athlete_name :  Display name for narrative text.
+
+        Each rule is isolated in its own try/except so a single data edge-case
+        cannot crash the entire report.  Failed rules are logged and surfaced as
+        INFO insights so the caller always receives a usable CoachingReport.
         """
         report = CoachingReport(athlete_name=athlete_name)
 
-        # Pull metric groups
+        # Pull metric groups — all defaulted to empty containers so rules can
+        # safely call .get() without an AttributeError on None.
         pool        = metrics.get("pool", {}) or {}
         de          = metrics.get("de", {}) or {}
         de_coaching = metrics.get("de_coaching", {}) or {}
@@ -143,38 +148,87 @@ class CoachingEngine:
         events      = metrics.get("events", []) or []
         annual      = metrics.get("annual_stats", []) or []
 
-        # event-level pool (always present — derived from events table flags)
-        from metrics.calculator import calc_event_pool_metrics
-        event_pool = calc_event_pool_metrics(events)
+        # Event-level pool aggregation — derived from event row flags, not bouts.
+        # Compute once; pass to rules that need it.
+        try:
+            from metrics.calculator import calc_event_pool_metrics
+            event_pool: dict = calc_event_pool_metrics(events)
+        except Exception as _ep_exc:
+            logger.exception(
+                "CoachingEngine: calc_event_pool_metrics failed for '%s'", athlete_name
+            )
+            event_pool = {}
 
-        # Fire all rules
-        self._rule_coverage(report, coverage)
-        self._rule_pool_win_rate(report, pool, event_pool, athlete_name)
-        self._rule_touch_differential(report, pool)
-        self._rule_advanced_to_de(report, event_pool, athlete_name)
-        self._rule_big_loss_rate(report, pool)
-        self._rule_de_win_rate(report, de, athlete_name)
-        self._rule_de_coaching_margins(report, de_coaching)
-        self._rule_de_round_weakness(report, de_coaching)
-        self._rule_new_vs_repeat(report, nvr, athlete_name)
-        self._rule_trend(report, trend, athlete_name)
-        self._rule_resilience(report, resilience)
-        self._rule_volatility(report, volatility, athlete_name)
-        self._rule_placement_progression(report, placement, athlete_name)
-        self._rule_peer_benchmark(report, peer, athlete_name)
-        self._rule_close_bouts(report, de_coaching)
-        self._rule_touch_efficiency(report, de_coaching)
-        self._rule_annual_trend(report, annual, athlete_name)
-        self._rule_event_volume(report, events, coverage)
+        # ── Rule dispatch ──────────────────────────────────────────────────
+        # Each tuple is (display_name, callable).  Rules run in priority order.
+        # An exception in one rule is caught, logged, and recorded as an INFO
+        # insight — all remaining rules still fire.
+        _rules: list[tuple[str, object]] = [
+            ("coverage",              lambda: self._rule_coverage(report, coverage)),
+            ("pool_win_rate",         lambda: self._rule_pool_win_rate(report, pool, event_pool, athlete_name)),
+            ("touch_differential",    lambda: self._rule_touch_differential(report, pool)),
+            ("advanced_to_de",        lambda: self._rule_advanced_to_de(report, event_pool, athlete_name)),
+            ("big_loss_rate",         lambda: self._rule_big_loss_rate(report, pool)),
+            ("de_win_rate",           lambda: self._rule_de_win_rate(report, de, athlete_name)),
+            ("de_coaching_margins",   lambda: self._rule_de_coaching_margins(report, de_coaching)),
+            ("de_round_weakness",     lambda: self._rule_de_round_weakness(report, de_coaching)),
+            ("new_vs_repeat",         lambda: self._rule_new_vs_repeat(report, nvr, athlete_name)),
+            ("trend",                 lambda: self._rule_trend(report, trend, athlete_name)),
+            ("resilience",            lambda: self._rule_resilience(report, resilience)),
+            ("volatility",            lambda: self._rule_volatility(report, volatility, athlete_name)),
+            ("placement_progression", lambda: self._rule_placement_progression(report, placement, athlete_name)),
+            ("peer_benchmark",        lambda: self._rule_peer_benchmark(report, peer, athlete_name)),
+            ("close_bouts",           lambda: self._rule_close_bouts(report, de_coaching)),
+            ("touch_efficiency",      lambda: self._rule_touch_efficiency(report, de_coaching)),
+            ("annual_trend",          lambda: self._rule_annual_trend(report, annual, athlete_name)),
+            ("event_volume",          lambda: self._rule_event_volume(report, events, coverage)),
+        ]
+
+        for rule_name, rule_fn in _rules:
+            try:
+                rule_fn()
+            except Exception as exc:
+                logger.exception(
+                    "CoachingEngine rule '%s' raised %s for athlete '%s'",
+                    rule_name, type(exc).__name__, athlete_name,
+                )
+                # Surface in the report so the coaching tab shows which rule failed
+                # without crashing the entire page.
+                report.insights.append(Insight(
+                    category="coverage",
+                    severity="INFO",
+                    headline=f"Analysis skipped: {rule_name} ({type(exc).__name__})",
+                    detail=(
+                        f"The '{rule_name}' analysis encountered an unexpected data condition "
+                        f"and was skipped. All other analyses are unaffected. "
+                        f"Error type: {type(exc).__name__}."
+                    ),
+                    data_ref=f"rule.{rule_name}",
+                    priority=99,
+                ))
 
         # Sort by priority then severity weight
         _severity_weight = {"CONCERN": 0, "STRENGTH": 1, "INFO": 2}
         report.insights.sort(key=lambda i: (i.priority, _severity_weight.get(i.severity, 3)))
 
         # Build summary and priorities
-        report.summary    = self._build_summary(report, athlete_name)
-        report.priorities = self._build_priorities(report)
-        report.coverage_note = self._coverage_note(coverage)
+        try:
+            report.summary = self._build_summary(report, athlete_name)
+        except Exception as exc:
+            logger.exception("_build_summary failed for '%s'", athlete_name)
+            report.summary = f"Summary generation encountered an error ({type(exc).__name__})."
+
+        try:
+            report.priorities = self._build_priorities(report)
+        except Exception as exc:
+            logger.exception("_build_priorities failed for '%s'", athlete_name)
+            report.priorities = []
+
+        try:
+            report.coverage_note = self._coverage_note(coverage)
+        except Exception as exc:
+            logger.exception("_coverage_note failed for '%s'", athlete_name)
+            report.coverage_note = "Data quality note unavailable."
 
         return report
 
