@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from database.client import get_read_client
 from metrics.calculator import calc_all_metrics
 from collectors.ftl_collector import collect_athlete
+from collectors.ukratings_collector import collect_athlete as collect_athlete_ukratings
 from intelligence.engine import CoachingEngine
 
 st.set_page_config(
@@ -202,8 +203,8 @@ def _render_pool_tab(pool: dict, pool_bouts: list, volatility: dict, resilience:
     for b in pool_bouts:
         ev = b.get("events") or {}
         eid = b["event_id"]
-        ev_map[eid]["ts"]   += b["ts"]
-        ev_map[eid]["tr"]   += b["tr"]
+        ev_map[eid]["ts"]   += (b["ts"] or 0)
+        ev_map[eid]["tr"]   += (b["tr"] or 0)
         ev_map[eid]["date"]  = ev.get("date") or ""
         ev_map[eid]["name"]  = ev.get("event_name", eid[:8])
 
@@ -241,10 +242,10 @@ def _render_pool_tab(pool: dict, pool_bouts: list, volatility: dict, resilience:
                 "Event":    ev.get("event_name", "—"),
                 "Opponent": b.get("opponent_name", "—"),
                 "Club":     b.get("opponent_club", "—"),
-                "Result":   "✅ W" if b["result"] else "❌ L",
-                "TS":       b["ts"],
-                "TR":       b["tr"],
-                "Diff":     b["ts"] - b["tr"],
+                "Result":   "✅ W" if b["result"] is True else ("❌ L" if b["result"] is False else "—"),
+                "TS":       b.get("ts"),
+                "TR":       b.get("tr"),
+                "Diff":     (b["ts"] - b["tr"]) if b.get("ts") is not None and b.get("tr") is not None else None,
             })
         st.dataframe(pd.DataFrame(bout_rows), hide_index=True, use_container_width=True)
 
@@ -577,14 +578,42 @@ else:
     st.sidebar.caption("Data not yet collected")
 
 if st.sidebar.button("🔄 Refresh Data Now"):
-    name_ftl = selected.get("name_ftl") or selected_name
-    with st.spinner(f"Collecting data for {selected_name}..."):
-        summary = collect_athlete(athlete_id=athlete_id, name_ftl=name_ftl)
-    st.success(
-        f"Done — {summary['events_updated']} events updated, "
-        f"{summary['events_skipped']} skipped, "
-        f"{len(summary.get('errors', []))} errors."
-    )
+    name_ftl  = selected.get("name_ftl") or selected_name
+    uk_id     = selected.get("uk_ratings_id")
+    uk_weapon = selected.get("weapon")
+
+    with st.status(f"Refreshing {selected_name}...", expanded=True) as _status:
+        # ── FTL pool data ──────────────────────────────────────────
+        st.write("Collecting FTL pool bouts...")
+        try:
+            ftl_summary = collect_athlete(athlete_id=athlete_id, name_ftl=name_ftl)
+            st.write(
+                f"FTL: {ftl_summary.get('events_updated', 0)} events updated, "
+                f"{ftl_summary.get('events_skipped', 0)} skipped, "
+                f"{len(ftl_summary.get('errors', []))} errors."
+            )
+        except Exception as _e:
+            st.write(f"FTL collection failed: {_e}")
+
+        # ── UK Ratings DE bouts + annual stats ────────────────────
+        if uk_id and uk_weapon:
+            st.write("Collecting UK Ratings DE bouts and annual stats...")
+            try:
+                ukr_summary = collect_athlete_ukratings(
+                    athlete_id=athlete_id,
+                    uk_ratings_id=uk_id,
+                    weapon=uk_weapon,
+                )
+                st.write(
+                    f"UK Ratings: {ukr_summary.get('annual_years', 0)} annual year(s) updated."
+                )
+            except Exception as _e:
+                st.write(f"UK Ratings collection failed: {_e}")
+        else:
+            st.write("UK Ratings: no uk_ratings_id configured for this athlete — skipped.")
+
+        _status.update(label="Refresh complete ✓", state="complete")
+
     st.cache_data.clear()
     st.rerun()
 

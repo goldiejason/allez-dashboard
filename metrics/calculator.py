@@ -620,6 +620,12 @@ def calc_peer_benchmarks(
             cohort_pool_win_pcts.append(ep["pool_win_pct"])
 
         de_bouts = fetch_de_bouts(cid)
+        de_bouts = [                                # apply NULL firewall inline
+            b for b in de_bouts
+            if b.get("ts") is not None
+            and b.get("tr") is not None
+            and b.get("result") is not None
+        ]
         dm       = calc_de_metrics(de_bouts)
         if dm.get("de_win_pct") is not None and dm.get("total_de_bouts", 0) >= 3:
             cohort_de_win_pcts.append(dm["de_win_pct"])
@@ -661,16 +667,47 @@ def calc_all_metrics(athlete_id: str) -> dict:
     de_bouts     = fetch_de_bouts(athlete_id)
     annual_stats = fetch_annual_stats(athlete_id)
 
-    has_pool_data = len(pool_bouts) > 0
-    has_de_data   = len(de_bouts)   > 0
+    # ── NULL firewall ────────────────────────────────────────────────
+    # Pending and unscored bouts are stored with NULL ts/tr/result.
+    # Define three filtered views once here; route each calculator to
+    # the smallest set it can safely consume.  Never substitute 0 for
+    # NULL — a 0 score is a valid fencing result and must not be
+    # confused with "no data".
+    #
+    #   _all:     every record, including pending / unscored
+    #             → coverage score + raw display in the UI
+    #   _scored:  ts, tr and result all present
+    #             → any metric involving arithmetic or win/loss counts
+    #   _matched: scored + opponent_name present
+    #             → rivalry and repeat-opponent analysis
+    pool_bouts_all     = pool_bouts
+    pool_bouts_scored  = [
+        b for b in pool_bouts
+        if b.get("ts") is not None
+        and b.get("tr") is not None
+        and b.get("result") is not None
+    ]
+    pool_bouts_matched = [b for b in pool_bouts_scored if b.get("opponent_name")]
 
-    pool   = calc_pool_metrics(pool_bouts)  if has_pool_data else {}
-    de     = calc_de_metrics(de_bouts)      if has_de_data   else {}
-    de_coaching = calc_de_coaching_metrics(de_bouts) if has_de_data else {}
+    de_bouts_all     = de_bouts
+    de_bouts_scored  = [
+        b for b in de_bouts
+        if b.get("ts") is not None
+        and b.get("tr") is not None
+        and b.get("result") is not None
+    ]
+    de_bouts_matched = [b for b in de_bouts_scored if b.get("opponent_name")]
+
+    has_pool_data = len(pool_bouts_scored) > 0
+    has_de_data   = len(de_bouts_scored)   > 0
+
+    pool        = calc_pool_metrics(pool_bouts_scored)        if has_pool_data else {}
+    de          = calc_de_metrics(de_bouts_scored)            if has_de_data   else {}
+    de_coaching = calc_de_coaching_metrics(de_bouts_scored)   if has_de_data   else {}
 
     placement_progression = calc_placement_progression(events)
 
-    coverage = compute_coverage_score(events, pool_bouts, de_bouts)
+    coverage = compute_coverage_score(events, pool_bouts_all, de_bouts_all)
 
     # Peer benchmarks — only meaningful if athlete has a weapon set
     weapon       = (athlete or {}).get("weapon")
@@ -699,17 +736,18 @@ def calc_all_metrics(athlete_id: str) -> dict:
         "pool":                  pool,
         "de":                    de,
         "de_coaching":           de_coaching,
-        "month_stats":           calc_monthly_performance(pool_bouts) if has_pool_data else {},
-        "rivals":                calc_rivals(pool_bouts, de_bouts)    if (has_pool_data or has_de_data) else [],
-        "nvr":                   calc_new_vs_repeat(pool_bouts)       if has_pool_data else {},
-        "volatility":            calc_volatility(events, pool_bouts)  if has_pool_data else {},
-        "trend":                 calc_trend(events, pool_bouts)        if has_pool_data else {},
-        "resilience":            calc_resilience_score(pool_bouts)    if has_pool_data else {},
+        "month_stats":           calc_monthly_performance(pool_bouts_scored)            if has_pool_data else {},
+        "rivals":                calc_rivals(pool_bouts_matched, de_bouts_matched)      if (has_pool_data or has_de_data) else [],
+        "nvr":                   calc_new_vs_repeat(pool_bouts_matched)                 if has_pool_data else {},
+        "volatility":            calc_volatility(events, pool_bouts_scored)             if has_pool_data else {},
+        "trend":                 calc_trend(events, pool_bouts_scored)                  if has_pool_data else {},
+        "resilience":            calc_resilience_score(pool_bouts_scored)               if has_pool_data else {},
         "placement_progression": placement_progression,
         "coverage":              coverage,
         "peer_benchmarks":       peer_benchmarks,
 
-        # Raw bouts for detailed views
-        "pool_bouts": pool_bouts,
-        "de_bouts":   de_bouts,
+        # Raw bouts for detailed views — intentionally unfiltered so that
+        # pending bouts appear in the UI (displayed with blank score columns).
+        "pool_bouts": pool_bouts_all,
+        "de_bouts":   de_bouts_all,
     }
