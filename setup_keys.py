@@ -12,9 +12,32 @@ from pathlib import Path
 ENV_PATH = Path(__file__).parent / ".env"
 
 
-def pbpaste():
-    result = subprocess.run(["pbpaste"], capture_output=True, text=True)
-    return result.stdout.strip()
+def get_clipboard() -> str:
+    """Read clipboard content cross-platform."""
+    if sys.platform == "darwin":
+        # macOS
+        result = subprocess.run(["pbpaste"], capture_output=True, text=True)
+        return result.stdout.strip()
+    elif sys.platform.startswith("linux"):
+        # Linux — try xclip then xsel, fall back to manual input
+        for cmd in [
+            ["xclip", "-selection", "clipboard", "-o"],
+            ["xsel", "--clipboard", "--output"],
+        ]:
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                if result.returncode == 0:
+                    return result.stdout.strip()
+            except FileNotFoundError:
+                continue
+        return input("  (clipboard tool not found) Paste the value and press ENTER: ").strip()
+    else:
+        # Windows
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-command", "Get-Clipboard"],
+            capture_output=True, text=True,
+        )
+        return result.stdout.strip()
 
 
 def update_env(key_name: str, value: str):
@@ -43,7 +66,7 @@ def main():
     print("  → In Chrome, go to the Supabase Legacy API Keys page")
     print("  → Click the 'Copy' button next to the anon / public key")
     input("  → Press ENTER here once you've copied it...")
-    anon = pbpaste()
+    anon = get_clipboard()
     if not anon.startswith("eyJ"):
         print(f"  ⚠️  Clipboard doesn't look like a JWT (got: {anon[:30]!r})")
         print("      Make sure you clicked 'Copy' on the Supabase page first.")
@@ -55,7 +78,7 @@ def main():
     print("  → Click 'Reveal' next to the service_role key")
     print("  → Then click 'Copy'")
     input("  → Press ENTER here once you've copied it...")
-    sr = pbpaste()
+    sr = get_clipboard()
     if not sr.startswith("eyJ"):
         print(f"  ⚠️  Clipboard doesn't look like a JWT (got: {sr[:30]!r})")
         sys.exit(1)

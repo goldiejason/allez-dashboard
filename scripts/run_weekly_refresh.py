@@ -2,7 +2,7 @@
 Weekly refresh script — run by GitHub Actions every Saturday and Sunday night.
 
 For each active athlete:
-  - Skip if refreshed within the last 6 days (respects on-demand button clicks)
+  - Skip if refreshed within the last 12 hours (respects on-demand button clicks)
   - Otherwise collect FTL pool/DE data, then run the full UK Ratings
     collection (event history, DE bouts, annual stats) for athletes
     who have a uk_ratings_id set.

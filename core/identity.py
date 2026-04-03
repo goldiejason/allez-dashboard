@@ -240,13 +240,20 @@ class IdentityResolver:
                 return MatchResult(index=i, name=c, score=1.0, strategy="word_set")
 
         # ── Strategy 2: surname-only prefix ─────────────────────────────
-        for i, c in enumerate(candidates):
-            if match_surname(target, c):
-                logger.debug(
-                    f"IdentityResolver: surname match '{target}' → '{c}' "
-                    f"(context={context})"
-                )
-                return MatchResult(index=i, name=c, score=0.9, strategy="surname")
+        # Only fire if exactly one candidate shares the target surname.
+        # Multiple same-surname candidates makes the match ambiguous —
+        # fall through to fuzzy where the given name can break the tie.
+        surname_matches = [
+            (i, c) for i, c in enumerate(candidates)
+            if match_surname(target, c)
+        ]
+        if len(surname_matches) == 1:
+            i, c = surname_matches[0]
+            logger.debug(
+                f"IdentityResolver: surname match '{target}' → '{c}' "
+                f"(context={context})"
+            )
+            return MatchResult(index=i, name=c, score=0.9, strategy="surname")
 
         # ── Strategy 3: fuzzy ────────────────────────────────────────────
         best_score = 0.0

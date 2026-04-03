@@ -427,7 +427,13 @@ def calc_resilience_score(pool_bouts: list[dict]) -> dict:
 
     bounce_backs: list[bool] = []
     for bouts in by_event.values():
-        ordered = sorted(bouts, key=lambda b: b.get("bout_order", 0))
+        # Exclude bouts without bout_order before sorting — a NULL bout_order
+        # defaults to 0, making two bouts appear adjacent when they may not be.
+        # Resilience requires correct relative ordering to be meaningful.
+        ordered_source = [b for b in bouts if b.get("bout_order") is not None]
+        if len(ordered_source) < 2:
+            continue
+        ordered = sorted(ordered_source, key=lambda b: b["bout_order"])
         for i, bout in enumerate(ordered[:-1]):
             if not bout["result"]:
                 bounce_backs.append(ordered[i + 1]["result"])

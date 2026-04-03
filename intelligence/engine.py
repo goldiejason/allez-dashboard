@@ -992,10 +992,13 @@ class CoachingEngine:
         self, report: CoachingReport, annual: list, name: str
     ) -> None:
         """Detect year-on-year improvement or regression from annual stats."""
+        # Filter out records with NULL year before sorting — NULL sorts to 0
+        # which makes it appear as an ancient season and distorts the delta.
+        annual = [r for r in annual if r.get("year") is not None]
         if len(annual) < 2:
             return
 
-        sorted_years = sorted(annual, key=lambda r: r.get("year", 0))
+        sorted_years = sorted(annual, key=lambda r: r["year"])
         latest = sorted_years[-1]
         prev   = sorted_years[-2]
 
