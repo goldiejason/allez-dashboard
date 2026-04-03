@@ -75,9 +75,9 @@ VOLATILITY_MODERATE = 10.0
 TREND_STRONG   = 8.0
 TREND_NEGATIVE = 8.0
 
-# Resilience score bands
-RESILIENCE_STRONG = 0.60
-RESILIENCE_WEAK   = 0.35
+# Resilience score bands (percentage scale 0–100, matching resilience_pct)
+RESILIENCE_STRONG = 60.0
+RESILIENCE_WEAK   = 35.0
 
 # Peer benchmark
 PEER_ELITE     = 80.0
@@ -219,7 +219,7 @@ class CoachingEngine:
         if wp is None:
             wp = event_pool.get("pool_win_pct")
         tier = pool.get("confidence_tier", "")
-        n    = pool.get("n", 0)
+        n    = pool.get("total_pool_bouts", 0)
 
         if wp is None or tier == "INSUFFICIENT":
             return
@@ -445,7 +445,7 @@ class CoachingEngine:
         """Assess overall direct elimination win rate."""
         wr   = de.get("de_win_pct")
         tier = de.get("confidence_tier", "")
-        n    = de.get("n", 0)
+        n    = de.get("total_de_bouts", 0)
 
         if wr is None or tier == "INSUFFICIENT":
             return
@@ -562,23 +562,25 @@ class CoachingEngine:
         if tier == "INSUFFICIENT" or not rrwr:
             return
 
-        # Find the worst round by win rate (minimum 3 bouts)
+        # Find the worst round by win rate (minimum 3 bouts at that round)
         weak_round = None
         weak_rate  = 100.0
         for rnd, data in rrwr.items():
-            if data.get("n", 0) >= 3:
-                wr = data.get("win_rate", 100)
-                if wr < weak_rate:
-                    weak_rate  = wr
-                    weak_round = rnd
+            n_rnd = data.get("n", 0)
+            wr    = data.get("win_rate", 100.0)
+            if n_rnd >= 3 and wr < weak_rate:
+                weak_rate  = wr
+                weak_round = rnd
 
         if weak_round and weak_rate < 40:
+            n_weak = rrwr[weak_round].get("n", 0)
             report.insights.append(Insight(
                 category="de",
                 severity="CONCERN",
                 headline=f"Consistent early exit at {weak_round} — {weak_rate:.0f}% win rate",
                 detail=(
-                    f"Win rate in {weak_round} bouts is only {weak_rate:.0f}%. "
+                    f"Win rate in {weak_round} bouts is only {weak_rate:.0f}% "
+                    f"(across {n_weak} bouts). "
                     "A pattern of early tableau exits at a consistent round suggests the fencer "
                     "faces a specific calibre of opponent at this stage where they are under-prepared. "
                     "Analyse video from these bouts and simulate the tactical patterns in training."
@@ -591,19 +593,21 @@ class CoachingEngine:
         strong_round = None
         strong_rate  = 0.0
         for rnd, data in rrwr.items():
-            if data.get("n", 0) >= 3:
-                wr = data.get("win_rate", 0)
-                if wr > strong_rate:
-                    strong_rate  = wr
-                    strong_round = rnd
+            n_rnd = data.get("n", 0)
+            wr    = data.get("win_rate", 0.0)
+            if n_rnd >= 3 and wr > strong_rate:
+                strong_rate  = wr
+                strong_round = rnd
 
         if strong_round and strong_rate >= 70:
+            n_strong = rrwr[strong_round].get("n", 0)
             report.insights.append(Insight(
                 category="de",
                 severity="STRENGTH",
                 headline=f"Strong {strong_round} performer — {strong_rate:.0f}% win rate",
                 detail=(
-                    f"Winning {strong_rate:.0f}% of {strong_round} bouts is an identifiable strength. "
+                    f"Winning {strong_rate:.0f}% of {strong_round} bouts "
+                    f"(across {n_strong} bouts) is an identifiable strength. "
                     "Understanding what tactical patterns drive this success can help replicate the "
                     "approach at other rounds."
                 ),
@@ -693,37 +697,43 @@ class CoachingEngine:
         self, report: CoachingReport, resilience: dict
     ) -> None:
         """Assess come-from-behind bout performance."""
-        score = resilience.get("resilience_score")
+        score = resilience.get("resilience_pct")
         tier  = resilience.get("confidence_tier", "")
+        n     = resilience.get("bounce_back_n", 0)
 
         if score is None or tier == "INSUFFICIENT":
             return
+
+        conf_label = f"({tier.lower()} confidence, {n} qualifying bouts)"
 
         if score >= RESILIENCE_STRONG:
             report.insights.append(Insight(
                 category="mental",
                 severity="STRENGTH",
-                headline=f"Resilient competitor — {score:.2f} resilience score",
+                headline=f"Resilient competitor — {score:.1f}% post-loss win rate",
                 detail=(
-                    f"A resilience score of {score:.2f} (maximum 1.0) indicates the fencer "
-                    "performs relatively well even after early-bout deficits. "
-                    "This composure under pressure is a key competitive differentiator."
+                    f"After conceding a bout, this fencer wins the next {score:.1f}% of the time "
+                    f"{conf_label}. "
+                    "The ability to reset and respond immediately to a loss is a significant "
+                    "competitive differentiator, particularly in pools where a run of losses "
+                    "can cascade quickly."
                 ),
-                data_ref="resilience.resilience_score",
+                data_ref="resilience.resilience_pct",
                 priority=5,
             ))
         elif score < RESILIENCE_WEAK:
             report.insights.append(Insight(
                 category="mental",
                 severity="CONCERN",
-                headline=f"Low resilience score — {score:.2f}",
+                headline=f"Low post-loss recovery — {score:.1f}% win rate after a loss",
                 detail=(
-                    f"A resilience score of {score:.2f} suggests the fencer struggles to recover "
-                    "from early deficits. This is often a mental pattern rather than a purely "
-                    "technical one. Introduce comeback training scenarios: practise from 0-3 down "
-                    "and build the psychological habit of resetting after a deficit."
+                    f"After losing a pool bout, this fencer wins only {score:.1f}% of the next "
+                    f"bout {conf_label}. "
+                    "This pattern suggests losses compound — a single setback disrupts the "
+                    "rest of the pool. Introduce comeback training scenarios: practise from "
+                    "0-3 down and build the psychological habit of resetting after a deficit."
                 ),
-                data_ref="resilience.resilience_score",
+                data_ref="resilience.resilience_pct",
                 priority=3,
             ))
 
@@ -731,7 +741,7 @@ class CoachingEngine:
         self, report: CoachingReport, volatility: dict, name: str
     ) -> None:
         """Flag high event-to-event win rate variance."""
-        vol = volatility.get("win_pct_std")
+        vol = volatility.get("career_sd")
         if vol is None:
             return
 
@@ -747,7 +757,7 @@ class CoachingEngine:
                     "unfamiliar venues, higher-level competitions, or after long travel. "
                     "Build a consistent pre-competition routine to reduce contextual performance swings."
                 ),
-                data_ref="volatility.win_pct_std",
+                data_ref="volatility.career_sd",
                 priority=4,
             ))
         elif vol >= VOLATILITY_MODERATE:
@@ -761,7 +771,7 @@ class CoachingEngine:
                     "Tracking contextual factors (venue, competition level, warm-up quality) "
                     "would help identify which conditions produce peak performance."
                 ),
-                data_ref="volatility.win_pct_std",
+                data_ref="volatility.career_sd",
                 priority=7,
             ))
 
@@ -935,10 +945,17 @@ class CoachingEngine:
         latest = sorted_years[-1]
         prev   = sorted_years[-2]
 
-        pool_now  = latest.get("pool_win_pct")
-        pool_prev = prev.get("pool_win_pct")
-        de_now    = latest.get("de_win_pct")
-        de_prev   = prev.get("de_win_pct")
+        def _pct(row: dict, w_key: str, l_key: str):
+            """Compute win% from raw W/L counts; returns None if no bouts."""
+            w = row.get(w_key, 0) or 0
+            l = row.get(l_key, 0) or 0
+            total = w + l
+            return round(w / total * 100, 1) if total else None
+
+        pool_now  = _pct(latest, "pool_w", "pool_l")
+        pool_prev = _pct(prev,   "pool_w", "pool_l")
+        de_now    = _pct(latest, "de_w",   "de_l")
+        de_prev   = _pct(prev,   "de_w",   "de_l")
 
         year_now  = latest.get("year", "current")
         year_prev = prev.get("year", "previous")

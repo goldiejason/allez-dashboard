@@ -281,7 +281,10 @@ def calc_de_coaching_metrics(de_bouts: list[dict]) -> dict:
         by_round[rnd].append(b["result"])
 
     round_win_rates = {
-        rnd: round(sum(results) / len(results) * 100, 1)
+        rnd: {
+            "n":        len(results),
+            "win_rate": round(sum(results) / len(results) * 100, 1),
+        }
         for rnd, results in by_round.items()
         if results
     }

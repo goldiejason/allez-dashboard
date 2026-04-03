@@ -161,7 +161,7 @@ def _render_pool_tab(pool: dict, pool_bouts: list, volatility: dict, resilience:
         return
 
     # ── Individual bout-level data available ────────────────────
-    pool_n    = pool.get("n", 0)
+    pool_n    = pool.get("total_pool_bouts", 0)
     pool_tier = pool.get("confidence_tier", "")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Win %",               _coerce(pool.get("pool_win_pct"),        "{}%"),
@@ -171,7 +171,7 @@ def _render_pool_tab(pool: dict, pool_bouts: list, volatility: dict, resilience:
     c3.metric("Big Loss Rate",        f"{pool.get('big_loss_rate')}%" if pool.get('big_loss_rate') is not None else "—",
               help="% of losses conceded by 3+ touches. Calculated from recorded bout-level data only.")
     res_pct  = resilience.get("resilience_pct") if resilience else None
-    res_n    = resilience.get("n", 0) if resilience else 0
+    res_n    = resilience.get("bounce_back_n", 0) if resilience else 0
     res_tier = resilience.get("confidence_tier", "") if resilience else ""
     c4.metric("Resilience Score",     f"{res_pct}%" if res_pct is not None else "—",
               help=f"Win rate immediately following a loss · {res_n} qualifying bouts ({res_tier.lower()} confidence). >60% = strong bounce-back.")
@@ -345,7 +345,7 @@ def _render_monthly_tab(month_stats: dict):
     sorted_months = sorted(month_stats.items(), key=lambda x: int(x[0]))
     labels   = [month_names.get(m, m) for m, _ in sorted_months]
     win_pcts = [d.get("win_pct") for _, d in sorted_months]
-    bouts_n  = [d.get("total_bouts", 0) for _, d in sorted_months]
+    bouts_n  = [d.get("W", 0) + d.get("L", 0) for _, d in sorted_months]
     fig = go.Figure(go.Bar(
         x=labels, y=win_pcts,
         marker_color="#1f77b4",
