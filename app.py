@@ -19,6 +19,15 @@ st.set_page_config(
     layout="wide",
 )
 
+# ─── Brand CSS ──────────────────────────────────────────────────
+st.markdown("""
+<style>
+/* Flush main content to top so orange banner sits edge-to-edge */
+.main .block-container { padding-top: 0 !important; }
+/* Flush sidebar top so logo banner aligns with main banner */
+[data-testid="stSidebar"] > div:first-child { padding-top: 0 !important; }
+</style>
+""", unsafe_allow_html=True)
 
 # ─── Display helpers ────────────────────────────────────────────
 def _coerce(v, fmt="{}"):
@@ -564,6 +573,13 @@ if not athletes:
 athlete_names = [a["name_display"] for a in athletes]
 athlete_map   = {a["name_display"]: a for a in athletes}
 
+st.sidebar.markdown("""
+<div style="background:linear-gradient(100deg,#b84200 0%,#e05a00 30%,#FF6B2B 65%,#ff8c55 100%);
+            padding:18px 16px;margin:-1px -1px 24px -1px;">
+  <img src="http://allezfencing.com/wp/wp-content/uploads/2016/01/Allezfencinglogo.gif"
+       style="height:44px;width:auto;filter:brightness(0) saturate(0);display:block;">
+</div>
+""", unsafe_allow_html=True)
 selected_name = st.sidebar.selectbox("Select Athlete", athlete_names)
 selected      = athlete_map[selected_name]
 athlete_id    = selected["id"]
@@ -631,18 +647,40 @@ pool     = metrics.get("pool", {})
 de       = metrics.get("de", {})
 
 # ─── Header ─────────────────────────────────────────────────────
-col_h1, col_h2 = st.columns([3, 1])
-with col_h1:
-    weapon_emoji = {"foil": "🤺", "epee": "⚔️", "sabre": "🗡️"}.get(
-        (athlete or {}).get("weapon", ""), "🤺"
-    )
-    st.title(f"{weapon_emoji} {selected_name}")
-    if athlete:
-        st.caption(
-            f"{athlete.get('age_category') or ''} · "
-            f"{athlete.get('weapon', '').capitalize()} · "
-            f"{athlete.get('club') or 'Allez Fencing'}"
-        )
+_weapon_emoji = {"foil": "🤺", "epee": "⚔️", "sabre": "🗡️"}.get(
+    (athlete or {}).get("weapon", ""), "🤺"
+)
+_age_cat = (athlete.get("age_category") or "") if athlete else ""
+_weapon  = (athlete.get("weapon", "").capitalize()) if athlete else ""
+_club    = ((athlete.get("club") or "Allez Fencing") if athlete else "Allez Fencing")
+_meta    = " · ".join(p for p in [_age_cat, _weapon, _club] if p)
+st.markdown(f"""
+<div style="background:linear-gradient(100deg,#b84200 0%,#e05a00 30%,#FF6B2B 65%,#ff8c55 100%);
+            padding:20px 28px;margin:-0.5rem -1rem 1.5rem -1rem;">
+  <div style="display:flex;align-items:center;gap:12px;">
+    <span style="font-size:28px;line-height:1;flex-shrink:0;">{_weapon_emoji}</span>
+    <div>
+      <div style="font-size:26px;font-weight:800;color:#fff;
+                  text-shadow:0 1px 4px rgba(0,0,0,0.25);letter-spacing:-0.3px;line-height:1.2;">
+        {selected_name}
+      </div>
+      <div style="margin-top:5px;display:flex;align-items:center;gap:7px;
+                  font-size:13px;color:rgba(255,255,255,0.85);flex-wrap:wrap;">
+        <span>{_meta}</span>
+        <span style="color:rgba(255,255,255,0.4);">·</span>
+        <span style="display:inline-flex;align-items:center;gap:6px;
+                     background:rgba(0,0,0,0.22);border:1px solid rgba(255,255,255,0.2);
+                     border-radius:20px;padding:3px 10px 3px 7px;font-size:12px;
+                     color:rgba(255,255,255,0.9);">
+          <span style="width:6px;height:6px;border-radius:50%;background:#fff;
+                       display:inline-block;flex-shrink:0;"></span>
+          Coach <strong style="color:#fff;font-weight:700;">Chris Galesloot</strong>
+        </span>
+      </div>
+    </div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
 
 # ─── No data state ───────────────────────────────────────────────
 has_event_pool_data = any(e.get("pool_v") is not None for e in events)
