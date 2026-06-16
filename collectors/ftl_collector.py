@@ -1,29 +1,29 @@
 """
-FTL Collector — FencingTimeLive data collection.
+FTL Collector â FencingTimeLive data collection.
 
 Discovered FTL API (via browser network analysis):
-  events/results/data/{event_id}          → JSON: all fencers + placement + fencer GUIDs
-  pools/results/data/{event_id}/{pool_id} → JSON: all fencers' aggregate pool stats
+  events/results/data/{event_id}          â JSON: all fencers + placement + fencer GUIDs
+  pools/results/data/{event_id}/{pool_id} â JSON: all fencers' aggregate pool stats
                                             (v, m, ts, tr, ind, prediction, place)
-  events/results/{event_id}               → HTML: contains pool links (for pool_id_seed discovery)
+  events/results/{event_id}               â HTML: contains pool links (for pool_id_seed discovery)
 
-Pool bout collection (Phase 2 — implemented):
-  pools/scores/{event_id}/{pool_id}  → HTML: full bout matrix for ALL pools in the event.
+Pool bout collection (Phase 2 â implemented):
+  pools/scores/{event_id}/{pool_id}  â HTML: full bout matrix for ALL pools in the event.
   Despite early notes suggesting socket.io, completed events render the full bout matrix
-  as plain HTML — one request returns every pool. Individual bouts are parsed directly
+  as plain HTML â one request returns every pool. Individual bouts are parsed directly
   from the table: cell[opp_pos + 1] gives the bout result (e.g. "V5" or "D3") for the
   fencer in that row vs the opponent at that column position.
 
 Auth (required from 2026-04-14):
   FTL requires a free account to access tournament results.
-  Set FTL_USERNAME and FTL_PASSWORD in .env — the collector handles login automatically.
+  Set FTL_USERNAME and FTL_PASSWORD in .env â the collector handles login automatically.
 
   Login flow (reverse-engineered from /js/login.*.js):
-    1. GET /account/login        → session cookie + CSRF token in <meta name='csrf_token'>
-    2. POST /login               → body: {username, password}, header: x-csrf-token
+    1. GET /account/login        â session cookie + CSRF token in <meta name='csrf_token'>
+    2. POST /login               â body: {username, password}, header: x-csrf-token
                                    response body = redirect URL on success, error text on failure
-    3. GET {redirect URL}        → establishes full authenticated session
-    4. All subsequent requests   → httpx.Client preserves session cookies automatically
+    3. GET {redirect URL}        â establishes full authenticated session
+    4. All subsequent requests   â httpx.Client preserves session cookies automatically
 """
 
 import os
@@ -44,9 +44,9 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-# ── Constants ──────────────────────────────────────────────────
+# ââ Constants ââââââââââââââââââââââââââââââââââââââââââââââââââ
 FTL_BASE        = "https://www.fencingtimelive.com"
-REQUEST_DELAY   = 1.5   # seconds between requests — be polite
+REQUEST_DELAY   = 1.5   # seconds between requests â be polite
 REQUEST_TIMEOUT = 20
 
 HEADERS = {
@@ -62,7 +62,7 @@ HEADERS = {
 # Matches a pool bout cell: "V5" (victory, 5 scored) or "D3" (defeat, 3 scored)
 _BOUT_CELL = re.compile(r'^([VD])(\d+)$')
 
-# ── Module-level authenticated client ─────────────────────────
+# ââ Module-level authenticated client âââââââââââââââââââââââââ
 # Created once at first use, reused across all requests.
 # httpx.Client maintains a cookie jar automatically.
 _client: Optional[httpx.Client] = None
@@ -73,10 +73,10 @@ def _login(client: httpx.Client) -> bool:
     Log in to FTL using credentials from the environment.
 
     Flow (from /js/login.*.js):
-      1. GET /account/login  — establish session cookie + extract CSRF token
-      2. POST /login         — submit credentials with CSRF header
-      3. Response body       — redirect URL on success, error string on failure
-      4. GET redirect URL    — follow to fully establish the session
+      1. GET /account/login  â establish session cookie + extract CSRF token
+      2. POST /login         â submit credentials with CSRF header
+      3. Response body       â redirect URL on success, error string on failure
+      4. GET redirect URL    â follow to fully establish the session
 
     Returns True on success, False on failure.
     """
@@ -85,7 +85,7 @@ def _login(client: httpx.Client) -> bool:
 
     if not username or not password:
         logger.warning(
-            "FTL_USERNAME or FTL_PASSWORD not set in .env — "
+            "FTL_USERNAME or FTL_PASSWORD not set in .env â "
             "running unauthenticated. This will break on 2026-04-14."
         )
         return False
@@ -94,7 +94,7 @@ def _login(client: httpx.Client) -> bool:
     post_url       = f"{FTL_BASE}/login"
 
     try:
-        # Step 1: GET login page — sets session cookie + gives us the CSRF token
+        # Step 1: GET login page â sets session cookie + gives us the CSRF token
         time.sleep(REQUEST_DELAY)
         resp = client.get(login_page_url)
         resp.raise_for_status()
@@ -109,7 +109,7 @@ def _login(client: httpx.Client) -> bool:
             logger.error("FTL: CSRF token is empty")
             return False
 
-        # Step 2: POST credentials — response body is redirect URL on success
+        # Step 2: POST credentials â response body is redirect URL on success
         time.sleep(REQUEST_DELAY)
         post_resp = client.post(
             post_url,
@@ -124,7 +124,7 @@ def _login(client: httpx.Client) -> bool:
         # Detect failure: success yields a URL path, failure yields an error string
         if not (redirect_target.startswith("/") or redirect_target.startswith("http")):
             logger.error(
-                f"FTL login failed — server said: {redirect_target[:120]}"
+                f"FTL login failed â server said: {redirect_target[:120]}"
             )
             return False
 
@@ -166,7 +166,7 @@ def _get_client() -> httpx.Client:
 
 def _is_auth_redirect(resp: httpx.Response) -> bool:
     """
-    Detect whether a response is actually a redirect to the login page —
+    Detect whether a response is actually a redirect to the login page â
     indicating the session has expired mid-run.
     """
     return "/account/login" in str(resp.url)
@@ -178,14 +178,14 @@ def _reauth_and_retry(url: str, is_json: bool) -> Optional[httpx.Response]:
     Returns the new response or None on failure.
     """
     global _client
-    logger.warning("FTL session expired — re-authenticating")
+    logger.warning("FTL session expired â re-authenticating")
     _client = None  # force a fresh login on next _get_client() call
     new_client = _get_client()
     try:
         time.sleep(REQUEST_DELAY)
         resp = new_client.get(url)
         if _is_auth_redirect(resp):
-            logger.error("FTL re-authentication failed — still redirecting to login")
+            logger.error("FTL re-authentication failed â still redirecting to login")
             return None
         return resp
     except Exception as e:
@@ -193,7 +193,7 @@ def _reauth_and_retry(url: str, is_json: bool) -> Optional[httpx.Response]:
         return None
 
 
-# ── HTTP helpers ───────────────────────────────────────────────
+# ââ HTTP helpers âââââââââââââââââââââââââââââââââââââââââââââââ
 
 def _get_json(url: str) -> Optional[list | dict]:
     """Fetch a URL and return parsed JSON, or None on failure."""
@@ -203,7 +203,7 @@ def _get_json(url: str) -> Optional[list | dict]:
         r = client.get(url)
         r.raise_for_status()
 
-        # Session expiry returns a 200 redirect to login — detect and reauth
+        # Session expiry returns a 200 redirect to login â detect and reauth
         if _is_auth_redirect(r):
             r = _reauth_and_retry(url, is_json=True)
             if r is None:
@@ -236,8 +236,8 @@ def _get_html(url: str) -> Optional[BeautifulSoup]:
         return None
 
 
-# ── Name matching ──────────────────────────────────────────────
-# Module-level IdentityResolver — instantiated once per process.
+# ââ Name matching ââââââââââââââââââââââââââââââââââââââââââââââ
+# Module-level IdentityResolver â instantiated once per process.
 # The DB client is injected lazily on first call that needs alias persistence.
 _resolver: Optional[IdentityResolver] = None
 
@@ -258,7 +258,7 @@ def _name_matches(ftl_name: str, athlete_ftl_name: str) -> bool:
     """
     Backward-compatible shim that delegates to IdentityResolver.
 
-    Uses Strategy 1 (exact word-set) — the same logic as before — so existing
+    Uses Strategy 1 (exact word-set) â the same logic as before â so existing
     call sites that pass a bare True/False check are unaffected.  The resolver
     is used where richer matching (fuzzy, alias cache) is needed.
     """
@@ -288,7 +288,7 @@ def _resolve_name(
     return result is not None
 
 
-# ── Pool ID discovery ──────────────────────────────────────────
+# ââ Pool ID discovery ââââââââââââââââââââââââââââââââââââââââââ
 
 def discover_pool_id_seed(ftl_event_id: str) -> Optional[str]:
     """
@@ -317,7 +317,7 @@ def discover_pool_id_seed(ftl_event_id: str) -> Optional[str]:
     return m.group(1).upper() if m else None
 
 
-# ── Event results (placements + fencer IDs) ────────────────────
+# ââ Event results (placements + fencer IDs) ââââââââââââââââââââ
 
 def fetch_event_results(ftl_event_id: str) -> list[dict]:
     """
@@ -336,7 +336,7 @@ def get_fencer_placement(ftl_event_id: str, name_ftl: str) -> tuple[Optional[int
     """
     results = fetch_event_results(ftl_event_id)
     field_size = len(results)
-    # Use full resolver for placement lookup — handles fuzzy/alias variants
+    # Use full resolver for placement lookup â handles fuzzy/alias variants
     resolver   = _get_resolver()
     names      = [e.get("name", "") for e in results]
     match      = resolver.find_in_list(
@@ -348,14 +348,16 @@ def get_fencer_placement(ftl_event_id: str, name_ftl: str) -> tuple[Optional[int
     if match is not None:
         entry = results[match.index]
         try:
-            placement = int(entry.get("place", 0))
+            _place_raw = str(entry.get("place", "") or "")
+            import re as _re_place
+            placement = int(_re_place.sub(r"[^0-9]", "", _place_raw) or 0) or None
         except (ValueError, TypeError):
             placement = None
         return placement, field_size
     return None, field_size
 
 
-# ── Pool aggregate stats ───────────────────────────────────────
+# ââ Pool aggregate stats âââââââââââââââââââââââââââââââââââââââ
 
 def fetch_pool_stats(ftl_event_id: str, pool_id_seed: str, name_ftl: str) -> Optional[dict]:
     """
@@ -366,12 +368,12 @@ def fetch_pool_stats(ftl_event_id: str, pool_id_seed: str, name_ftl: str) -> Opt
     so any valid pool_id works as the second path segment.
 
     Returned dict fields:
-      pool_v    — victories
-      pool_l    — losses
-      pool_ts   — touches scored
-      pool_tr   — touches received
-      pool_ind  — indicator (ts - tr)
-      advanced_to_de — True if prediction == "Advanced"
+      pool_v    â victories
+      pool_l    â losses
+      pool_ts   â touches scored
+      pool_tr   â touches received
+      pool_ind  â indicator (ts - tr)
+      advanced_to_de â True if prediction == "Advanced"
     """
     url = f"{FTL_BASE}/pools/results/data/{ftl_event_id}/{pool_id_seed}"
     data = _get_json(url)
@@ -406,7 +408,7 @@ def fetch_pool_stats(ftl_event_id: str, pool_id_seed: str, name_ftl: str) -> Opt
     return None
 
 
-# ── Pool bout collection ───────────────────────────────────────
+# ââ Pool bout collection âââââââââââââââââââââââââââââââââââââââ
 #
 # FTL pool scores API (reverse-engineered via browser network analysis):
 #
@@ -415,7 +417,7 @@ def fetch_pool_stats(ftl_event_id: str, pool_id_seed: str, name_ftl: str) -> Opt
 #       One GUID per pool in the event.
 #
 #   GET /pools/scores/{event_id}/{pool_id_seed}/{pool_id}?dbut=true
-#       Returns an HTML fragment for ONE specific pool — the full bout matrix.
+#       Returns an HTML fragment for ONE specific pool â the full bout matrix.
 #       Cell format: "V5" = victory 5 scored, "D3" = defeat 3 scored.
 #       Cell index formula (verified): row_i[opp_pos + 1] = fencer i's bout vs opp_pos.
 #
@@ -548,9 +550,9 @@ def collect_pool_bouts_for_event(
     Collect individual pool bouts for one event and write them to Supabase.
 
     1. Skip if bouts already exist (idempotent on re-runs)
-    2. Fetch landing page → extract all pool IDs from var ids = [...]
+    2. Fetch landing page â extract all pool IDs from var ids = [...]
     3. Fetch each pool fragment (?dbut=true) until the athlete is found
-    4. Parse bout matrix → write to pool_bouts table
+    4. Parse bout matrix â write to pool_bouts table
     """
     existing = db.table("pool_bouts").select("id").eq("event_id", event_db_id).limit(1).execute()
     if existing.data:
@@ -587,7 +589,7 @@ def collect_pool_bouts_for_event(
     return {"inserted": 0, "skipped": False, "error": f"'{name_ftl}' not found in any of {len(pool_ids)} pools"}
 
 
-# ── Main collection pipeline ───────────────────────────────────
+# ââ Main collection pipeline âââââââââââââââââââââââââââââââââââ
 
 def collect_athlete(athlete_id: str, name_ftl: str, force: bool = False) -> dict:
     """
@@ -601,7 +603,7 @@ def collect_athlete(athlete_id: str, name_ftl: str, force: bool = False) -> dict
       4. Updates the event row in Supabase
 
     NOTE: U10 and earlier events will be collected as their FTL event IDs
-    are added to the events table — the collector handles all age categories
+    are added to the events table â the collector handles all age categories
     automatically since it searches by athlete name regardless of category.
 
     Returns a summary dict with counts.
@@ -661,7 +663,7 @@ def collect_athlete(athlete_id: str, name_ftl: str, force: bool = False) -> dict
                         f"  {event_name}: pool V{pool_stats['pool_v']}"
                         f"/L{pool_stats['pool_l']} "
                         f"TS{pool_stats['pool_ts']}-TR{pool_stats['pool_tr']} "
-                        f"{'→DE' if pool_stats['advanced_to_de'] else '→OUT'}"
+                        f"{'âDE' if pool_stats['advanced_to_de'] else 'âOUT'}"
                     )
 
             # 4. Write updates to Supabase (before pool bouts so event_db_id is valid)
@@ -671,19 +673,19 @@ def collect_athlete(athlete_id: str, name_ftl: str, force: bool = False) -> dict
             else:
                 summary["events_skipped"] += 1
 
-            # 5. Collect individual pool bouts (idempotent — skips if already present)
+            # 5. Collect individual pool bouts (idempotent â skips if already present)
             if pool_id_seed:
                 bout_result = collect_pool_bouts_for_event(
                     db, event_db_id, ftl_event_id, pool_id_seed, name_ftl
                 )
                 if bout_result["error"]:
-                    logger.warning(f"  {event_name}: pool bouts — {bout_result['error']}")
+                    logger.warning(f"  {event_name}: pool bouts â {bout_result['error']}")
                 elif not bout_result["skipped"]:
                     logger.info(f"  {event_name}: pool bouts inserted={bout_result['inserted']}")
 
             # 5b. Aggregate-stat fallback: if the FTL pools/results/data endpoint
             #     returned nothing (pool_stats is None) but we have bout rows for
-            #     this event — either just inserted or previously stored — compute
+            #     this event â either just inserted or previously stored â compute
             #     pool_v/l/ts/tr/ind from those bouts and write them now.
             #     This handles events where FTL publishes bout scores but not the
             #     aggregate summary (observed on some LPJS club-circuit events).
@@ -709,7 +711,7 @@ def collect_athlete(athlete_id: str, name_ftl: str, force: bool = False) -> dict
                     }
                     db.table("events").update(agg).eq("id", event_db_id).execute()
                     logger.info(
-                        f"  {event_name}: pool stats computed from bouts — "
+                        f"  {event_name}: pool stats computed from bouts â "
                         f"V{v}/L{l} TS{ts}-TR{tr} Ind{ts - tr:+d}"
                     )
                     summary["events_updated"] += 1
@@ -745,13 +747,13 @@ def collect_all_athletes() -> dict:
     return totals
 
 
-# ── FTL-first weekend event discovery ─────────────────────────
+# ââ FTL-first weekend event discovery âââââââââââââââââââââââââ
 #
 # UK Ratings publishes competition history with a 3-7 day lag, so
 # weekend events will not appear until mid-week.  FTL has results
 # live during the competition itself.  This function scans FTL for
 # recent UK tournaments, checks whether any roster athletes competed,
-# and creates / links the event rows in the DB — so the dashboard
+# and creates / links the event rows in the DB â so the dashboard
 # shows the result the same weekend it happened.
 #
 # Called automatically at the start of every weekend refresh.
@@ -774,13 +776,13 @@ def discover_recent_ftl_events(days_back: int = 7, dry_run: bool = False) -> dic
     to_date   = today.isoformat()
 
     logger.info(
-        f"FTL recent discovery: GBR tournaments {from_date} → {to_date}"
+        f"FTL recent discovery: GBR tournaments {from_date} â {to_date}"
         + (" [DRY-RUN]" if dry_run else "")
     )
 
     db = get_write_client()
 
-    # ── Load active roster ─────────────────────────────────────────
+    # ââ Load active roster âââââââââââââââââââââââââââââââââââââââââ
     roster = db.table("athletes")\
         .select("id, name_display, name_ftl, weapon")\
         .eq("active", True)\
@@ -788,10 +790,10 @@ def discover_recent_ftl_events(days_back: int = 7, dry_run: bool = False) -> dic
         .execute().data or []
 
     if not roster:
-        logger.warning("  No active athletes with name_ftl — skipping discovery")
+        logger.warning("  No active athletes with name_ftl â skipping discovery")
         return {"tournaments_scanned": 0, "events_linked": 0, "errors": []}
 
-    # Surname → [athlete, ...] for O(1) first-pass filtering
+    # Surname â [athlete, ...] for O(1) first-pass filtering
     by_surname: dict[str, list] = {}
     for a in roster:
         sur = a["name_ftl"].split()[0].upper()
@@ -799,20 +801,28 @@ def discover_recent_ftl_events(days_back: int = 7, dry_run: bool = False) -> dic
 
     summary: dict = {"tournaments_scanned": 0, "events_linked": 0, "errors": []}
 
-    # ── Search FTL for recent UK tournaments ───────────────────────
-    search_url = (
-        f"{FTL_BASE}/tournaments/search/data/advanced"
-        f"?from={from_date}&to={to_date}&country=GBR"
-    )
-    tournaments = _get_json(search_url)
-    if not isinstance(tournaments, list):
+    # ââ Search FTL for recent UK tournaments âââââââââââââââââââââââ
+    WATCH_COUNTRIES = ["GBR", "FRA", "BEL", "NED", "IRL"]
+
+    tournaments: list[dict] = []
+    for _wc in WATCH_COUNTRIES:
+        _wc_url = (
+            f"{FTL_BASE}/tournaments/search/data/advanced"
+            f"?from={from_date}&to={to_date}&country={_wc}"
+        )
+        _wc_result = _get_json(_wc_url)
+        if isinstance(_wc_result, list):
+            tournaments.extend(_wc_result)
+        else:
+            logger.warning(f"  FTL search for {_wc} returned no data")
+    if not tournaments:
         logger.warning("  FTL tournament search returned no data — skipping")
         return summary
 
-    logger.info(f"  {len(tournaments)} GBR tournament(s) in window")
+    logger.info(f"  {len(tournaments)} tournament(s) across {WATCH_COUNTRIES}")
     summary["tournaments_scanned"] = len(tournaments)
 
-    # ── Cache existing DB tournaments keyed by ftl_tournament_id ──
+    # ââ Cache existing DB tournaments keyed by ftl_tournament_id ââ
     # Supabase PostgREST defaults to a 1 000-row page limit; explicitly
     # requesting 10 000 rows ensures the full table is loaded regardless of
     # how many tournaments accumulate over time.
@@ -835,7 +845,7 @@ def discover_recent_ftl_events(days_back: int = 7, dry_run: bool = False) -> dic
         if not ftl_tid or not t_name:
             continue
 
-        # ── Fetch event schedule ───────────────────────────────────
+        # ââ Fetch event schedule âââââââââââââââââââââââââââââââââââ
         sched = _get_html(f"{FTL_BASE}/tournaments/eventSchedule/{ftl_tid}")
         if not sched:
             continue
@@ -851,7 +861,7 @@ def discover_recent_ftl_events(days_back: int = 7, dry_run: bool = False) -> dic
         if not ftl_events:
             continue
 
-        # ── For each event, check participant list ─────────────────
+        # ââ For each event, check participant list âââââââââââââââââ
         for fe in ftl_events:
             ftl_eid = fe["ftl_event_id"]
             fe_name = fe["name"]
@@ -881,14 +891,14 @@ def discover_recent_ftl_events(days_back: int = 7, dry_run: bool = False) -> dic
 
             names = ", ".join(a["name_display"] for a in matched)
             logger.info(
-                f"  ✓ '{t_name}' / '{fe_name}' — "
+                f"  â '{t_name}' / '{fe_name}' â "
                 f"{len(matched)} athlete(s): {names}"
             )
 
             if dry_run:
                 continue
 
-            # ── Ensure tournament row exists ───────────────────────
+            # ââ Ensure tournament row exists âââââââââââââââââââââââ
             db_tid = existing_t.get(ftl_tid)
             if not db_tid:
                 try:
@@ -900,17 +910,17 @@ def discover_recent_ftl_events(days_back: int = 7, dry_run: bool = False) -> dic
                     }).execute()
                     if not res.data:
                         raise RuntimeError(
-                            f"Tournament insert for '{t_name}' returned no data — "
+                            f"Tournament insert for '{t_name}' returned no data â "
                             "possible RLS policy or unique-constraint violation"
                         )
                     db_tid = res.data[0]["id"]
                     existing_t[ftl_tid] = db_tid
-                    logger.info(f"    Created tournament '{t_name}' → {db_tid[:8]}…")
+                    logger.info(f"    Created tournament '{t_name}' â {db_tid[:8]}â¦")
                 except Exception as exc:
                     # 23505 = unique constraint violation.
                     # Fallback strategy (two attempts):
                     #   1. Look up by ftl_tournament_id (covers concurrent inserts)
-                    #   2. Look up by (name, date_start) — covers the case where
+                    #   2. Look up by (name, date_start) â covers the case where
                     #      the row was manually inserted with a different ftl_tournament_id
                     #      than what FTL's search API returns.  If found, patch the
                     #      ftl_tournament_id so future runs hit the cache correctly.
@@ -928,13 +938,13 @@ def discover_recent_ftl_events(days_back: int = 7, dry_run: bool = False) -> dic
                                 existing_t[ftl_tid] = db_tid
                                 logger.info(
                                     f"    Tournament '{t_name}' already exists "
-                                    f"(ftl_id match) → reusing {db_tid[:8]}…"
+                                    f"(ftl_id match) â reusing {db_tid[:8]}â¦"
                                 )
                                 found_via_fallback = True
                         except Exception:
                             pass
 
-                        # Attempt 2: look up by (name, date_start) — handles
+                        # Attempt 2: look up by (name, date_start) â handles
                         # mismatched ftl_tournament_id from manual inserts
                         if not found_via_fallback and t_start:
                             try:
@@ -953,7 +963,7 @@ def discover_recent_ftl_events(days_back: int = 7, dry_run: bool = False) -> dic
                                     ).eq("id", db_tid).execute()
                                     logger.info(
                                         f"    Tournament '{t_name}' found by (name, date_start) "
-                                        f"→ reusing {db_tid[:8]}… and patching ftl_tournament_id"
+                                        f"â reusing {db_tid[:8]}â¦ and patching ftl_tournament_id"
                                     )
                                     found_via_fallback = True
                             except Exception as lookup_exc:
@@ -963,7 +973,7 @@ def discover_recent_ftl_events(days_back: int = 7, dry_run: bool = False) -> dic
 
                         if not found_via_fallback:
                             logger.error(
-                                f"    Duplicate error — cannot find '{t_name}' by ftl_id or (name, date_start)"
+                                f"    Duplicate error â cannot find '{t_name}' by ftl_id or (name, date_start)"
                             )
                             summary["errors"].append(exc_str)
                             continue
@@ -972,7 +982,7 @@ def discover_recent_ftl_events(days_back: int = 7, dry_run: bool = False) -> dic
                         summary["errors"].append(exc_str)
                         continue
 
-            # ── Ensure event row per matched athlete ───────────────
+            # ââ Ensure event row per matched athlete âââââââââââââââ
             for athlete in matched:
                 aid = athlete["id"]
                 try:
@@ -999,10 +1009,10 @@ def discover_recent_ftl_events(days_back: int = 7, dry_run: bool = False) -> dic
                             else:
                                 logger.debug(
                                     f"    {athlete['name_display']}: "
-                                    f"event already linked — skip"
+                                    f"event already linked â skip"
                                 )
                         elif stored_eid and stored_eid != ftl_eid:
-                            # Stored ID differs from the FTL canonical ID — correct it
+                            # Stored ID differs from the FTL canonical ID â correct it
                             db.table("events").update({
                                 "ftl_event_id": ftl_eid,
                                 "date":         t_start or None,
@@ -1010,7 +1020,7 @@ def discover_recent_ftl_events(days_back: int = 7, dry_run: bool = False) -> dic
                             logger.info(
                                 f"    {athlete['name_display']}: "
                                 f"corrected ftl_event_id "
-                                f"({stored_eid[:8]}… → {ftl_eid[:8]}…)"
+                                f"({stored_eid[:8]}â¦ â {ftl_eid[:8]}â¦)"
                             )
                             summary["events_linked"] += 1
                         else:
@@ -1047,7 +1057,7 @@ def discover_recent_ftl_events(days_back: int = 7, dry_run: bool = False) -> dic
                     summary["errors"].append(str(exc))
 
     logger.info(
-        f"FTL discovery complete — "
+        f"FTL discovery complete â "
         f"tournaments_scanned={summary['tournaments_scanned']}, "
         f"events_linked={summary['events_linked']}, "
         f"errors={len(summary['errors'])}"
